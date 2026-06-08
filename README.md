@@ -98,6 +98,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) for the storefront and [http://localhost:3000/admin](http://localhost:3000/admin) for the admin panel.
 
+On production, `dptone-admin.vercel.app` automatically redirects to `/admin` via middleware (both domains point to the same Vercel project).
+
 ### 6. Production build
 
 ```bash
