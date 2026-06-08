@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { isAdminHostname } from "@/lib/admin-host";
+import { isAdminHostname, isLocalDevHost } from "@/lib/admin-host";
 
 const ADMIN_ROUTE_SEGMENTS = new Set([
   "add-product",
@@ -33,8 +33,10 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const onAdminHost = isAdminHostname(host);
   const isAdminPath = pathname.startsWith("/admin");
+  const localDev = isLocalDevHost(host);
 
-  if (!onAdminHost && isAdminPath) {
+  // Production storefront: block /admin. Local dev: / → storefront, /admin → admin.
+  if (!onAdminHost && !localDev && isAdminPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/";
     return NextResponse.redirect(url);

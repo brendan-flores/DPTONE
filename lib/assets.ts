@@ -6,7 +6,7 @@ export const LOGO_STORAGE_PATH = "DPT ONE LOGO/dpt-one-logo.png";
 export const LOGO_URL = productImageUrl(LOGO_STORAGE_PATH);
 
 export const WELCOME_MODAL_IMAGE_URL = productImageUrl(
-  "Welcome Modal Image/welcomeModalImage.png"
+  "product-images/Welcome Modal Image/welcomeModalImage.png"
 );
 
 /** Slider images live under the nested `product-images/` folder in the bucket. */

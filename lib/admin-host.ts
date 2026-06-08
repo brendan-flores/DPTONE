@@ -12,14 +12,15 @@ export function getAdminDashboardUrl(): string {
   return "/";
 }
 
+export function isLocalDevHost(host: string): boolean {
+  if (process.env.NODE_ENV !== "development") return false;
+  const hostname = host.split(":")[0].toLowerCase();
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+/** True only for the configured admin subdomain (e.g. dptone-admin.vercel.app). */
 export function isAdminHostname(host: string): boolean {
   const hostname = host.split(":")[0].toLowerCase();
   const configured = getAdminHost()?.toLowerCase();
-  if (configured && hostname === configured) return true;
-
-  if (process.env.NODE_ENV === "development") {
-    return hostname === "localhost" || hostname === "127.0.0.1";
-  }
-
-  return false;
+  return Boolean(configured && hostname === configured);
 }
