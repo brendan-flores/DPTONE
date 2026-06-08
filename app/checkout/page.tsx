@@ -7,12 +7,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useToast } from "@/hooks/use-toast";
-import { collection, getDocs, query, addDoc, serverTimestamp, doc, getDoc, updateDoc, setDoc, runTransaction } from "firebase/firestore";
-import { db } from "@/lib/firebase";
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from '@/components/ui/select';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import type { CartItem } from "@/context/CartContext";
-import { getMonthKey, getWeekKey } from '@/lib/utils';
+import { fetchUserAddresses, type UserAddress } from "@/lib/storefront/addresses";
+import {
+  completeCustomerOrder,
+  type CheckoutAddress,
+  type CheckoutOrderItem,
+} from "@/lib/storefront/checkout";
 import {
   PENDING_QRPH_ORDER_KEY,
   PERSONAL_GCASH_QR_PATH,
@@ -24,17 +27,63 @@ import type {
 } from "@/lib/checkout/types";
 import { CheckoutSubmitButton } from "@/components/checkout/CheckoutSubmitButton";
 
-function deepCleanUndefined(obj: any): any {
-  if (Array.isArray(obj)) {
-    return obj.map(deepCleanUndefined);
-  } else if (obj && typeof obj === 'object') {
-    return Object.fromEntries(
-      Object.entries(obj)
-        .filter(([_, v]) => v !== undefined)
-        .map(([k, v]) => [k, deepCleanUndefined(v)])
-    );
+function toCheckoutAddress(
+  details: {
+    firstName: string;
+    lastName: string;
+    address1: string;
+    address2?: string;
+    postalCode: string;
+    city: string;
+    region: string;
+    phone: string;
+    country?: string;
+    email?: string;
   }
-  return obj;
+): CheckoutAddress {
+  return {
+    firstName: details.firstName,
+    lastName: details.lastName,
+    address1: details.address1,
+    address2: details.address2 || undefined,
+    postalCode: details.postalCode,
+    city: details.city,
+    region: details.region,
+    phone: details.phone,
+    country: details.country || "Philippines",
+    email: details.email,
+  };
+}
+
+function buildOrderItems(
+  items: CartItem[],
+  allCartItems: CartItem[]
+): CheckoutOrderItem[] {
+  return items.map((item) => {
+    let color = item.selectedColor || item.color;
+    if (!color && item.id) {
+      const product = allCartItems.find((p) => p.id === item.id) || item;
+      if (product?.color && typeof product.color === "string") {
+        const colorOptions = product.color
+          .split(",")
+          .map((c: string) => c.trim())
+          .filter(Boolean);
+        if (colorOptions.length === 1) color = colorOptions[0];
+      }
+    }
+    return {
+      id: String(item.id),
+      name: item.name,
+      price:
+        typeof item.price === "string"
+          ? parseFloat(item.price.replace(/[^\d.]/g, ""))
+          : Number(item.price),
+      quantity: item.quantity,
+      image: item.image,
+      size: item.selectedSize,
+      color: color || "N/A",
+    };
+  });
 }
 
 // Helper function for Philippine phone validation
@@ -99,7 +148,7 @@ export default function CheckoutPage() {
     }
   }
 
-  const [addresses, setAddresses] = useState<any[]>([]);
+  const [addresses, setAddresses] = useState<UserAddress[]>([]);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   /** Drives checkout button spinner: idle | cod | qrph */
   const [checkoutProcessing, setCheckoutProcessing] =
@@ -135,22 +184,6 @@ export default function CheckoutPage() {
     phone: "+63",
   });
 
-  const [savedAddresses, setSavedAddresses] = useState<any[]>([
-    {
-      id: 1,
-      address: "Dapdap carcar city cebu, 6019 Carcar City PH-CEB, Philippines (Brendan emmanuel flores)",
-      firstName: "Brendan emmanuel",
-      lastName: "flores",
-      address1: "Dapdap carcar city cebu",
-      address2: "",
-      postalCode: "6019",
-      city: "Carcar City",
-      region: "Cebu",
-      country: "Philippines",
-      phone: "+639123456789"
-    },
-  ]); // Dummy saved addresses
-
   const [shippingMethod, setShippingMethod] = useState('standard');
   const shippingOptions = [
     { value: 'standard', label: 'Standard Shipping', time: '3–5 business days', price: 0 },
@@ -163,38 +196,33 @@ export default function CheckoutPage() {
     return selected ? selected.price : 0;
   };
 
-  // Fetch addresses from Firestore
   useEffect(() => {
-    const fetchAddresses = async () => {
+    const loadAddresses = async () => {
       if (!user) return;
-      const addressesCollection = collection(db, `users/${user.uid}/addresses`);
-      const q = query(addressesCollection);
-      const querySnapshot = await getDocs(q);
-      const fetchedAddresses: any[] = [];
-      querySnapshot.forEach((doc) => {
-        fetchedAddresses.push({ id: doc.id, ...doc.data() });
-      });
-      // Sort so default address is first
-      fetchedAddresses.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0));
-      setAddresses(fetchedAddresses);
-      // Set default selected address
-      const defaultAddr = fetchedAddresses.find(addr => addr.isDefault) || fetchedAddresses[0];
-      if (defaultAddr) {
-        setSelectedAddressId(defaultAddr.id);
-        setDeliveryDetails((prev) => ({
-          ...prev,
-          firstName: defaultAddr.firstName,
-          lastName: defaultAddr.lastName,
-          address1: defaultAddr.address1,
-          address2: defaultAddr.address2 || "",
-          postalCode: defaultAddr.postalCode,
-          city: defaultAddr.city,
-          region: defaultAddr.region,
-          phone: defaultAddr.phone,
-        }));
+      try {
+        const fetchedAddresses = await fetchUserAddresses(user.uid);
+        setAddresses(fetchedAddresses);
+        const defaultAddr =
+          fetchedAddresses.find((addr) => addr.isDefault) || fetchedAddresses[0];
+        if (defaultAddr) {
+          setSelectedAddressId(defaultAddr.id);
+          setDeliveryDetails((prev) => ({
+            ...prev,
+            firstName: defaultAddr.firstName,
+            lastName: defaultAddr.lastName,
+            address1: defaultAddr.address1,
+            address2: defaultAddr.address2 || "",
+            postalCode: defaultAddr.postalCode,
+            city: defaultAddr.city,
+            region: defaultAddr.region,
+            phone: defaultAddr.phone,
+          }));
+        }
+      } catch (err) {
+        console.error("Failed to load addresses:", err);
       }
     };
-    fetchAddresses();
+    loadAddresses();
   }, [user]);
 
   // Update delivery details if user changes
@@ -247,215 +275,60 @@ export default function CheckoutPage() {
     }));
   };
 
-  const handleSavedAddressChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const selectedAddress = savedAddresses.find(addr => addr.id === parseInt(e.target.value));
-    if (selectedAddress) {
-      setBillingDetails(selectedAddress);
-    }
-  };
-
-  const saveOrderToFirebase = async (billingDetailsArg?: any) => {
+  const saveOrder = async (
+    billingDetailsArg?: typeof billingDetails,
+    orderNumber?: string
+  ): Promise<string | undefined> => {
     if (!user) {
       toast({
         title: "Error",
         description: "Please log in to place an order",
       });
-      console.error("User not logged in");
       return;
     }
 
     try {
-      console.log('[Checkout] selectedCartItems:', selectedCartItems);
-      const subtotal = selectedCartItems.reduce((total, item) => {
-        let price = typeof item.price === 'string' ? parseFloat(item.price.replace(/[^\d.]/g, '')) : Number(item.price);
-        return total + (price * item.quantity);
-      }, 0);
-      const orderData = {
-        userId: user.uid,
-        userEmail: user.email,
-        orderNumber: `ORD-${Date.now()}`,
-        dateOrdered: serverTimestamp(),
-        dateOrderedClient: Date.now(),
-        createdAt: serverTimestamp(),
-        status: 'pending',
-        total: subtotal + getShippingPrice(),
-        subtotal,
-        shipping: getShippingPrice(),
-        tax: 0,
-        items: selectedCartItems.map(item => {
-          let color = item.selectedColor || item.color;
-          // Try to infer color from product if missing
-          if (!color && item.id) {
-            // Try to get the product from cartItems or selectedCartItems
-            const product = cartItems.find(p => p.id === item.id) || item;
-            if (product && product.color && typeof product.color === 'string') {
-              const colorOptions = product.color.split(',').map((c: string) => c.trim()).filter(Boolean);
-              if (colorOptions.length === 1) {
-                color = colorOptions[0];
-              }
-            }
-          }
-          return {
-            id: item.id,
-            name: item.name,
-            price: typeof item.price === "string"
-              ? parseFloat(item.price.replace(/[^\d.]/g, ''))
-              : item.price,
-            quantity: item.quantity,
-            image: item.image,
-            size: item.selectedSize,
-            color: color || 'N/A',
-          };
-        }),
-        shippingAddress: deliveryDetails,
-        billingAddress: billingDetailsArg || deliveryDetails,
-        paymentMethod: paymentMethod,
-        paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
-        shippingMethod: shippingMethod,
-        notes: ''
+      const items = buildOrderItems(selectedCartItems, cartItems);
+      if (items.length === 0) throw new Error("No items in order");
+
+      const subtotal = items.reduce(
+        (total, item) => total + item.price * item.quantity,
+        0
+      );
+      const shipping = getShippingPrice();
+      const billing = billingDetailsArg ?? {
+        ...deliveryDetails,
+        country: "Philippines",
       };
 
-      // Clean undefined values deeply
-      console.log('orderData before cleaning:', orderData);
-      const cleanOrderData = deepCleanUndefined(orderData);
-      // Guarantee dateOrdered, dateOrderedClient, and createdAt are set after cleaning
-      cleanOrderData.dateOrdered = serverTimestamp();
-      cleanOrderData.dateOrderedClient = cleanOrderData.dateOrderedClient || Date.now();
-      cleanOrderData.createdAt = serverTimestamp();
-      console.log('orderData after cleaning:', cleanOrderData);
-
-      const adminProductId = cleanOrderData.items[0]?.id;
-      if (!adminProductId) throw new Error('No adminProductId found in order items');
-      const productsOrderRef = collection(db, 'adminProducts', adminProductId, 'productsOrder');
-      const userOrdersRef = collection(db, 'users', user.uid, 'orders');
-
-      // Prepare refs to capture IDs
-      let adminOrderId = '';
-      let userOrderId = '';
-
-      // Use a transaction to create both orders atomically
-      await runTransaction(db, async (transaction) => {
-        // Create admin order
-        const adminOrderRef = doc(productsOrderRef);
-        adminOrderId = adminOrderRef.id;
-        transaction.set(adminOrderRef, {
-          ...cleanOrderData,
-          userId: user.uid,
-        });
-        // Create user order with globalOrderId
-        const userOrderRef = doc(userOrdersRef);
-        userOrderId = userOrderRef.id;
-        transaction.set(userOrderRef, {
-          ...cleanOrderData,
-          globalOrderId: adminOrderRef.id,
-          adminProductId: adminProductId,
-        });
-        // Link userOrderId in admin order
-        transaction.update(adminOrderRef, { userOrderId: userOrderRef.id });
+      const orderId = await completeCustomerOrder({
+        orderNumber: orderNumber ?? `ORD-${Date.now()}`,
+        status: "pending",
+        total: subtotal + shipping,
+        subtotal,
+        shipping,
+        tax: 0,
+        paymentMethod,
+        paymentStatus: "pending",
+        shippingAddress: toCheckoutAddress(deliveryDetails),
+        billingAddress: toCheckoutAddress(billing),
+        items,
+        userEmail: user.email ?? undefined,
+        notes: JSON.stringify({ shippingMethod }),
       });
-
-      // Save each cart item as a document in the orderDetails subcollection (not in transaction)
-      for (const item of cleanOrderData.items) {
-        await addDoc(collection(db, 'adminProducts', adminProductId, 'productsOrder', adminOrderId, 'orderDetails'), {
-          ...item,
-          dateOrdered: cleanOrderData.dateOrdered,
-        });
-      }
-
-      // Calculate total quantity purchased
-      const totalQuantity = Array.isArray(cleanOrderData.items)
-        ? cleanOrderData.items.reduce((sum: number, item: any) => sum + (item.quantity || 0), 0)
-        : 0;
-      // Add to sales collection for analytics
-      await addDoc(collection(db, 'sales'), {
-        timestamp: cleanOrderData.dateOrdered || serverTimestamp(),
-        total: cleanOrderData.total,
-        quantity: totalQuantity,
-        userId: user.uid,
-        orderId: adminOrderId,
-      });
-      // --- AdminAnalytics Monthly and Weekly Aggregation ---
-      try {
-        const now = new Date();
-        const monthKey = getMonthKey(now);
-        const weekKey = getWeekKey(now);
-        const dayOfWeek = now.toLocaleString('en-US', { weekday: 'short' }); // 'Sun', 'Mon', ...
-        const dayOfMonth = String(now.getDate()); // '1', '2', ...
-        // --- Weekly ---
-        const weeklyRef = doc(db, 'AdminAnalytics', 'weekly_' + weekKey);
-        const weeklySnap = await getDoc(weeklyRef);
-        const allWeekDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        let weeklyDays = Object.fromEntries(allWeekDays.map(d => [d, 0]));
-        let weeklyTotal = cleanOrderData.total;
-        let weeklyQuantity = totalQuantity;
-        if (weeklySnap.exists()) {
-          const data = weeklySnap.data();
-          weeklyDays = { ...weeklyDays, ...(data.days || {}) };
-          weeklyDays[dayOfWeek] = (weeklyDays[dayOfWeek] || 0) + cleanOrderData.total;
-          weeklyTotal = (data.total || 0) + cleanOrderData.total;
-          weeklyQuantity = (data.quantity || 0) + totalQuantity;
-        } else {
-          weeklyDays[dayOfWeek] = cleanOrderData.total;
-        }
-        await setDoc(weeklyRef, {
-          days: weeklyDays,
-          total: weeklyTotal,
-          quantity: weeklyQuantity,
-          updatedAt: serverTimestamp(),
-        });
-        // --- Monthly ---
-        const monthlyRef = doc(db, 'AdminAnalytics', 'monthly_' + monthKey);
-        const monthlySnap = await getDoc(monthlyRef);
-        const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-        let monthlyDays = Object.fromEntries(Array.from({length: 31}, (_, i) => [String(i+1), 0]));
-        let monthlyTotal = cleanOrderData.total;
-        let monthlyQuantity = totalQuantity;
-        if (monthlySnap.exists()) {
-          const data = monthlySnap.data();
-          monthlyDays = { ...monthlyDays, ...(data.days || {}) };
-          monthlyDays[dayOfMonth] = (monthlyDays[dayOfMonth] || 0) + cleanOrderData.total;
-          monthlyTotal = (data.total || 0) + cleanOrderData.total;
-          monthlyQuantity = (data.quantity || 0) + totalQuantity;
-        } else {
-          monthlyDays[dayOfMonth] = cleanOrderData.total;
-        }
-        // Zero out days not in this month
-        for (let d = daysInMonth + 1; d <= 31; d++) monthlyDays[String(d)] = 0;
-        await setDoc(monthlyRef, {
-          days: monthlyDays,
-          total: monthlyTotal,
-          quantity: monthlyQuantity,
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        console.error('Error updating AdminAnalytics monthly/weekly sales:', err);
-      }
-
-      // Update purchasedCount for each purchased product
-      try {
-        for (const item of cleanOrderData.items) {
-          const productRef = doc(db, 'adminProducts', item.id);
-          const productSnap = await getDoc(productRef);
-          let currentCount = 0;
-          if (productSnap.exists()) {
-            currentCount = productSnap.data().purchasedCount || 0;
-          }
-          await updateDoc(productRef, { purchasedCount: currentCount + (item.quantity || 1) });
-        }
-      } catch (err) {
-        console.error('Failed to update purchasedCount in adminProducts:', err);
-      }
 
       toast({
         title: "Successfully ordered.",
         description: "Thank you for purchasing with DPT ONE.",
-        variant: "success"
+        variant: "success",
       });
-      return adminOrderId;
+      return orderId;
     } catch (error) {
       toast({
         title: "Error",
-        description: "Error saving order: " + (error instanceof Error ? error.message : String(error)),
+        description:
+          "Error saving order: " +
+          (error instanceof Error ? error.message : String(error)),
       });
       console.error("Error saving order:", error);
       throw error;
@@ -532,7 +405,7 @@ export default function CheckoutPage() {
   };
 
   /**
-   * COD: save order to Firebase, clear cart, go to orders page.
+   * COD: save order to Supabase, clear cart, go to orders page.
    */
   const handleCodCheckout = async (): Promise<void> => {
     const billingToSend = sameAsShipping
@@ -541,7 +414,7 @@ export default function CheckoutPage() {
 
     setCheckoutProcessing("cod");
     try {
-      const orderId = await saveOrderToFirebase(billingToSend);
+      const orderId = await saveOrder(billingToSend);
       if (orderId) {
         removeFromCartByIds(selectedCartItems.map((item) => item.id));
         router.push("/orders");
@@ -884,17 +757,29 @@ export default function CheckoutPage() {
                 <label htmlFor="savedAddresses" className="block text-sm font-medium text-[#60A5FA]">Saved addresses</label>
                 <Select value={selectedAddressId || undefined} onValueChange={value => {
                   setSelectedAddressId(value);
-                  const addr = savedAddresses.find(a => a.id === value);
+                  const addr = addresses.find(a => a.id === value);
                   if (addr) {
-                    setBillingDetails(addr);
+                    setBillingDetails({
+                      firstName: addr.firstName,
+                      lastName: addr.lastName,
+                      address1: addr.address1,
+                      address2: addr.address2 || "",
+                      postalCode: addr.postalCode,
+                      city: addr.city,
+                      region: addr.region,
+                      country: addr.country || "Philippines",
+                      phone: addr.phone,
+                    });
                   }
                 }}>
                   <SelectTrigger className="mt-1 block w-full border border-[#60A5FA] rounded-md shadow-sm px-4 py-2 h-12 flex items-center justify-between text-base bg-[#101828] text-[#60A5FA] focus:outline-none focus:ring-2 focus:ring-[#60A5FA] focus:border-[#60A5FA]">
                     <SelectValue placeholder="Select a saved address" />
                   </SelectTrigger>
                   <SelectContent>
-                    {savedAddresses.map(addr => (
-                      <SelectItem key={addr.id} value={addr.id}>{addr.address}</SelectItem>
+                    {addresses.map(addr => (
+                      <SelectItem key={addr.id} value={addr.id}>
+                        {addr.address1}, {addr.city}, {addr.region}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>

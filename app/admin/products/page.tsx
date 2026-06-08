@@ -1,55 +1,37 @@
 "use client";
-import { useEffect, useState } from "react";
-import { db } from "@/lib/firebase";
-import { collection, getDocs, doc, updateDoc, deleteDoc } from "firebase/firestore";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import {
+  deleteAdminProduct,
+  fetchAdminProducts,
+  updateAdminProduct,
+  type AdminProduct,
+} from "@/lib/admin/products";
+import { ADMIN_REALTIME_TABLES } from "@/lib/admin/realtime";
+import { useAdminRealtimeQuery } from "@/hooks/useAdminRealtimeQuery";
 
-
-interface Product {
-  id: string;
-  name: string;
-  price: number;
-  stock: number;
-  imageUrl?: string;
-  imageUrls?: string[];
-  brand?: string;
-  sizes?: { size: string; stock: number }[];
-  totalStock?: number;
-  isFeaturedProduct?: boolean;
-}
+type Product = AdminProduct & { stock?: number };
 
 export default function AdminProductsPage() {
-  const [products, setProducts] = useState<Product[]>([]);
+  const productTables = useMemo(
+    () => [...ADMIN_REALTIME_TABLES.products],
+    []
+  );
+  const { data, loading, setData } = useAdminRealtimeQuery<Product[]>({
+    channel: "products",
+    tables: productTables,
+    fetcher: async () => {
+      const items = await fetchAdminProducts();
+      return items.map((p) => ({
+        ...p,
+        stock: p.totalStock ?? 0,
+      }));
+    },
+  });
+  const products = data ?? [];
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValues, setEditValues] = useState<Partial<Product>>({});
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const fetchProducts = async () => {
-      setLoading(true);
-      const querySnapshot = await getDocs(collection(db, "adminProducts"));
-      const items: Product[] = [];
-      querySnapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        items.push({
-          id: docSnap.id,
-          name: data.name,
-          price: data.price,
-          stock: data.stock,
-          imageUrl: data.imageUrl,
-          imageUrls: data.imageUrls,
-          brand: data.brand,
-          sizes: data.sizes,
-          totalStock: data.totalStock,
-          isFeaturedProduct: data.isFeaturedProduct === true,
-        });
-      });
-      setProducts(items);
-      setLoading(false);
-    };
-    fetchProducts();
-  }, []);
 
   const startEdit = (product: Product) => {
     setEditingId(product.id);
@@ -80,19 +62,32 @@ export default function AdminProductsPage() {
       return;
     }
     setSaving(true);
-    const updateData: any = {
+    await updateAdminProduct(id, {
       name: editValues.name,
       price: Number(editValues.price),
-      stock: Number(editValues.stock),
-    };
-    if (editValues.sizes) {
-      updateData.sizes = editValues.sizes.map(s => ({ size: s.size, stock: Number(s.stock) }));
-      updateData.totalStock = editValues.sizes.reduce((sum, s) => sum + Number(s.stock), 0);
-    }
-    await updateDoc(doc(db, "adminProducts", id), updateData);
-    setProducts((prev) =>
-      prev.map((p) =>
-        p.id === id ? { ...p, ...editValues, price: Number(editValues.price), stock: Number(editValues.stock), sizes: editValues.sizes ? editValues.sizes.map(s => ({ ...s, stock: Number(s.stock) })) : undefined, totalStock: editValues.sizes ? editValues.sizes.reduce((sum, s) => sum + Number(s.stock), 0) : undefined } : p
+      sizes: editValues.sizes?.map((s) => ({
+        size: s.size,
+        stock: Number(s.stock),
+      })),
+    });
+    const totalStock = editValues.sizes
+      ? editValues.sizes.reduce((sum, s) => sum + Number(s.stock), 0)
+      : undefined;
+    setData((prev) =>
+      (prev ?? []).map((p) =>
+        p.id === id
+          ? {
+              ...p,
+              ...editValues,
+              price: Number(editValues.price),
+              stock: totalStock ?? p.stock,
+              sizes: editValues.sizes?.map((s) => ({
+                ...s,
+                stock: Number(s.stock),
+              })),
+              totalStock,
+            }
+          : p
       )
     );
     setEditingId(null);
@@ -102,20 +97,23 @@ export default function AdminProductsPage() {
 
   const deleteProduct = async (id: string) => {
     if (!window.confirm('Are you sure you want to delete this product?')) return;
-    await deleteDoc(doc(db, 'adminProducts', id));
-    setProducts((prev) => prev.filter((p) => p.id !== id));
+    await deleteAdminProduct(id);
+    setData((prev) => (prev ?? []).filter((p) => p.id !== id));
   };
 
   const toggleFeatured = async (id: string, value: boolean) => {
-    await updateDoc(doc(db, "adminProducts", id), { isFeaturedProduct: value });
-    setProducts((prev) => prev.map((p) => p.id === id ? { ...p, isFeaturedProduct: value } : p));
+    await updateAdminProduct(id, { isFeaturedProduct: value });
+    setData((prev) =>
+      (prev ?? []).map((p) =>
+        p.id === id ? { ...p, isFeaturedProduct: value } : p
+      )
+    );
   };
 
   if (loading) return <div className="p-8 text-[#8ec0ff]">Loading products...</div>;
 
   return (
-    <div className="w-full h-screen flex bg-black">
-      <div className="w-full h-full bg-[#161e2e] px-8 py-10 flex flex-col">
+    <div className="w-full pb-8">
         <h1 className="text-3xl font-bold mb-8 text-[#3390ff]">Manage Products</h1>
         <div className="overflow-x-auto">
           <table className="min-w-full bg-[#161e2e] border border-[#22304a] rounded-lg text-white">
@@ -276,7 +274,6 @@ export default function AdminProductsPage() {
             </tbody>
           </table>
         </div>
-      </div>
     </div>
   );
 } 

@@ -2,10 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { Button } from '@/components/ui/button'; // Assuming you have a Button component
-import { getAuth, updateProfile } from 'firebase/auth';
-import { db } from '@/lib/firebase'; // Import db from firebase
-import { collection, addDoc, query, where, getDocs, serverTimestamp, doc, updateDoc, writeBatch, deleteDoc } from 'firebase/firestore'; // Import Firestore functions
+import { supabase } from '@/lib/supabase';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 
 
@@ -109,8 +106,38 @@ const philippineProvinces = [
   "Abra", "Agusan del Norte", "Agusan del Sur", "Aklan", "Albay", "Antique", "Apayao", "Aurora", "Basilan", "Bataan", "Batanes", "Batangas", "Benguet", "Biliran", "Bohol", "Bukidnon", "Bulacan", "Cagayan", "Camarines Norte", "Camarines Sur", "Camiguin", "Capiz", "Catanduanes", "Cavite", "Cebu", "Cotabato", "Davao de Oro", "Davao del Norte", "Davao del Sur", "Davao Occidental", "Davao Oriental", "Dinagat Islands", "Eastern Samar", "Guimaras", "Ifugao", "Ilocos Norte", "Ilocos Sur", "Iloilo", "Isabela", "Kalinga", "La Union", "Laguna", "Lanao del Norte", "Lanao del Sur", "Leyte", "Maguindanao del Norte", "Maguindanao del Sur", "Marinduque", "Masbate", "Metro Manila", "Misamis Occidental", "Misamis Oriental", "Mountain Province", "Negros Occidental", "Negros Oriental", "Northern Samar", "Nueva Ecija", "Nueva Vizcaya", "Occidental Mindoro", "Oriental Mindoro", "Palawan", "Pampanga", "Pangasinan", "Quezon", "Quirino", "Rizal", "Romblon", "Samar", "Sarangani", "Siquijor", "Sorsogon", "South Cotabato", "Southern Leyte", "Sultan Kudarat", "Sulu", "Surigao del Norte", "Surigao del Sur", "Tarlac", "Tawi-Tawi", "Zambales", "Zamboanga del Norte", "Zamboanga del Sur", "Zamboanga Sibugay"
 ];
 
+type AddressRow = {
+  id: string;
+  is_default: boolean;
+  country: string;
+  first_name: string;
+  last_name: string;
+  address1: string;
+  address2: string | null;
+  postal_code: string;
+  city: string;
+  region: string;
+  phone: string;
+};
+
+function mapRowToAddress(row: AddressRow): Address {
+  return {
+    id: row.id,
+    isDefault: row.is_default,
+    country: row.country,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    address1: row.address1,
+    address2: row.address2 ?? undefined,
+    postalCode: row.postal_code,
+    city: row.city,
+    region: row.region,
+    phoneCode: "",
+    phone: row.phone,
+  };
+}
+
 export default function ProfilePage() {
-  console.log("ProfilePage rendered");
   const { user, refreshUser } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [firstName, setFirstName] = useState("");
@@ -133,7 +160,7 @@ export default function ProfilePage() {
     phone: "",
   });
 
-  // For simplicity, email is read-only as per image. Firebase email update is separate.
+  // Email is read-only in profile; change via Supabase Auth dashboard or a future settings flow.
   const userEmail = user?.email || "N/A";
 
   const handleEditClick = () => {
@@ -150,23 +177,33 @@ export default function ProfilePage() {
   };
 
   const handleSave = async () => {
-    if (!user) return; // Ensure user is not null
+    if (!user) return;
 
     try {
-      const auth = getAuth();
-      if (!auth.currentUser) {
-        console.error("No authenticated user found.");
-        return;
-      }
-      await updateProfile(auth.currentUser, {
-        displayName: `${firstName} ${lastName}`,
+      const displayName = `${firstName} ${lastName}`.trim();
+
+      const { error: authError } = await supabase.auth.updateUser({
+        data: { displayName },
       });
-      await refreshUser(); // Call refreshUser after successful update
-      console.log("Profile updated successfully!");
+      if (authError) throw authError;
+
+      const { error: profileError } = await supabase.from("profiles").upsert({
+        id: user.uid,
+        email: user.email ?? "",
+        display_name: displayName,
+      });
+      if (profileError) throw profileError;
+
+      await supabase
+        .from("users")
+        .update({ display_name: displayName })
+        .eq("id", user.uid);
+
+      await refreshUser();
       setIsEditing(false);
     } catch (error) {
       console.error("Error updating profile:", error);
-      // Handle error, e.g., show an error message to the user
+      alert("Failed to update profile. Please try again.");
     }
   };
 
@@ -196,7 +233,6 @@ export default function ProfilePage() {
   };
 
   const handleAddressSave = async () => {
-    console.log("[DEBUG] handleAddressSave called");
     // Validation: check only required fields (address2 is optional)
     if (
       !newAddress.firstName.trim() ||
@@ -209,7 +245,6 @@ export default function ProfilePage() {
       !newAddress.phoneCode.trim() ||
       !newAddress.phone.trim()
     ) {
-      console.log("[DEBUG] Validation failed: missing required fields");
       alert("Please fill out all the fields.");
       return;
     }
@@ -223,53 +258,57 @@ export default function ProfilePage() {
     }
 
     if (!user) {
-      console.log("[DEBUG] No user found");
-      alert('You must be logged in to save an address.');
+      alert("You must be logged in to save an address.");
       return;
     }
 
     try {
-      const addressToSave = {
-        firstName: newAddress.firstName,
-        lastName: newAddress.lastName,
+      const phone =
+        newAddress.phoneCode === "+63"
+          ? `+63${newAddress.phone.replace(/^0/, "")}`
+          : `${newAddress.phoneCode}${newAddress.phone}`;
+
+      if (newAddress.isDefault) {
+        await supabase
+          .from("addresses")
+          .update({ is_default: false })
+          .eq("user_id", user.uid);
+      }
+
+      const { error } = await supabase.from("addresses").insert({
+        user_id: user.uid,
+        is_default: newAddress.isDefault,
+        country: newAddress.country,
+        first_name: newAddress.firstName,
+        last_name: newAddress.lastName,
         address1: newAddress.address1,
-        address2: newAddress.address2 || '',
+        address2: newAddress.address2 || null,
+        postal_code: newAddress.postalCode,
         city: newAddress.city,
         region: newAddress.region,
-        country: newAddress.country,
-        postalCode: newAddress.postalCode,
-        phone: newAddress.phoneCode === '+63'
-          ? `+63${newAddress.phone.replace(/^0/, '')}`
-          : `${newAddress.phoneCode}${newAddress.phone}`,
-        isDefault: newAddress.isDefault,
-        createdAt: serverTimestamp(),
-      };
-      console.log("[DEBUG] About to write to Firestore:", addressToSave);
-      const userAddressesCollection = collection(db, `users/${user.uid}/addresses`);
-      await addDoc(userAddressesCollection, addressToSave);
-      console.log("[DEBUG] Firestore write successful");
+        phone,
+      });
+      if (error) throw error;
+
       handleAddressModalClose();
-      console.log("[DEBUG] Modal closed after save");
       await fetchAddresses();
-      console.log("[DEBUG] fetchAddresses called after save");
     } catch (error) {
-      console.error('[DEBUG] Error saving address:', error);
-      alert('Failed to save address. Please try again.');
+      console.error("Error saving address:", error);
+      alert("Failed to save address. Please try again.");
     }
   };
 
   const fetchAddresses = async () => {
     if (!user) return;
     try {
-      const addressesCollection = collection(db, `users/${user.uid}/addresses`);
-      const q = query(addressesCollection);
-      const querySnapshot = await getDocs(q);
-      const fetchedAddresses: Address[] = [];
-      querySnapshot.forEach((doc) => {
-        fetchedAddresses.push({ id: doc.id, ...doc.data() } as Address);
-      });
-      console.log('Fetched addresses:', fetchedAddresses);
-      setAddresses(fetchedAddresses);
+      const { data, error } = await supabase
+        .from("addresses")
+        .select("*")
+        .eq("user_id", user.uid)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+      setAddresses((data as AddressRow[]).map(mapRowToAddress));
     } catch (error) {
       console.error("Error fetching addresses:", error);
     }
@@ -282,40 +321,42 @@ export default function ProfilePage() {
     }
   }, [user]);
 
-  useEffect(() => {
-    if (isAddingAddress) {
-      console.log('Add Address Modal mounted');
-    }
-  }, [isAddingAddress]);
-
   // Set selected address as default and unset others
   const handleSetDefaultAddress = async (addressId: string) => {
     if (!user) return;
     try {
-      const addressesCollection = collection(db, `users/${user.uid}/addresses`);
-      const q = query(addressesCollection);
-      const querySnapshot = await getDocs(q);
-      const batch = writeBatch(db);
-      querySnapshot.forEach((docSnap) => {
-        const ref = doc(db, `users/${user.uid}/addresses/${docSnap.id}`);
-        batch.update(ref, { isDefault: docSnap.id === addressId });
-      });
-      await batch.commit();
+      const { error: clearError } = await supabase
+        .from("addresses")
+        .update({ is_default: false })
+        .eq("user_id", user.uid);
+      if (clearError) throw clearError;
+
+      const { error: setError } = await supabase
+        .from("addresses")
+        .update({ is_default: true })
+        .eq("id", addressId)
+        .eq("user_id", user.uid);
+      if (setError) throw setError;
+
       await fetchAddresses();
     } catch (error) {
-      alert('Failed to set default address.');
+      alert("Failed to set default address.");
       console.error(error);
     }
   };
 
-  // Remove address handler
   const handleRemoveAddress = async (addressId: string) => {
     if (!user) return;
     try {
-      await deleteDoc(doc(db, `users/${user.uid}/addresses/${addressId}`));
+      const { error } = await supabase
+        .from("addresses")
+        .delete()
+        .eq("id", addressId)
+        .eq("user_id", user.uid);
+      if (error) throw error;
       await fetchAddresses();
     } catch (error) {
-      alert('Failed to remove address.');
+      alert("Failed to remove address.");
       console.error(error);
     }
   };

@@ -8,37 +8,11 @@ import Link from "next/link"
 import { useCart } from '@/context/CartContext'
 import { useAuth } from '@/context/AuthContext'
 import { useRouter } from 'next/navigation'
-import { db } from '@/lib/firebase'
-import { collection, getDocs, onSnapshot } from 'firebase/firestore'
 import WelcomeCard from '@/components/WelcomeCard'
+import { useStorefrontProducts } from '@/hooks/useStorefrontProducts'
+import { HERO_SLIDER_IMAGES } from '@/lib/assets'
 
-// Sample slider images data
-const sliderImages = [
-  {
-    id: 1,
-    image: "https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/Image%20Sliders/CharlotteFolk.png",
-    title: "Charlotte Folk",
-    subtitle: "Fresh streetwear for the bold.",
-  },
-  {
-    id: 2,
-    image: "https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/Image%20Sliders/MNLA.png",
-    title: "MNLA",
-    subtitle: "Urban vibes, modern style.",
-  },
-  {
-    id: 3,
-    image: "https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/Image%20Sliders/RichBoyz.png",
-    title: "Rich Boyz",
-    subtitle: "Elevate your look.",
-  },
-  {
-    id: 4,
-    image: "https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/Image%20Sliders/Strap.png",
-    title: "Strap",
-    subtitle: "Strap in for style.",
-  },
-]
+const sliderImages = [...HERO_SLIDER_IMAGES]
 
 // HERO / SLIDER SECTION
 function ImageSlider() {
@@ -173,26 +147,9 @@ export default function DPTOneFashion() {
   const { user } = useAuth()
   const router = useRouter()
 
-  const [products, setProducts] = useState<any[]>([])
+  const { products, loading, error } = useStorefrontProducts()
   const [hoveredProduct, setHoveredProduct] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    const unsubscribe = onSnapshot(collection(db, 'adminProducts'), (querySnapshot) => {
-      const items: any[] = [];
-      querySnapshot.forEach((docSnap) => {
-        items.push({ id: docSnap.id, ...docSnap.data() })
-      });
-      setProducts(items);
-      setLoading(false);
-    }, (err) => {
-      setError('Failed to load products. Please try again later.');
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+  const featuredProducts = products.filter((p) => p.isFeaturedProduct === true)
 
   const handleAddToCart = (product: any) => {
     if (!user) {
@@ -249,12 +206,10 @@ export default function DPTOneFashion() {
                 </div>
               ) : (
                 <div className="grid grid-cols-3 md:grid-cols-4 gap-4 md:gap-x-8 md:gap-y-8 px-2 sm:px-4 md:px-0 max-w-4xl mx-auto">
-                  {products.filter(product => product.isFeaturedProduct === true).length === 0 ? (
+                  {featuredProducts.length === 0 ? (
                     <div className="col-span-4 text-center text-[#60A5FA]">No featured products.</div>
                   ) : (
-                    products
-                      .filter(product => product.isFeaturedProduct === true)
-                      .map((product) => {
+                    featuredProducts.map((product) => {
                         // Sold out logic
                         const isSoldOut = (typeof product.totalStock === 'number' && product.totalStock === 0) ||
                           (Array.isArray(product.sizes) && product.sizes.reduce((sum: number, s: { stock: number }) => sum + (s.stock || 0), 0) === 0);

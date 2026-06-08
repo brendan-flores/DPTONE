@@ -1,12 +1,16 @@
 import type { ReactNode } from "react";
-import { ThemeProvider } from "@/components/theme-provider";
-import { CartProvider } from "@/context/CartContext";
-import { AuthProvider } from "@/context/AuthContext";
+import type { Metadata } from "next";
+import { AdminAuthProvider } from "@/context/AdminAuthContext";
+import AdminShell from "@/components/admin/AdminShell";
+
+export const metadata: Metadata = {
+  title: "DPT ONE admin",
+};
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen w-full flex overflow-hidden">
-      {children}
-    </div>
+    <AdminAuthProvider>
+      <AdminShell>{children}</AdminShell>
+    </AdminAuthProvider>
   );
-} 
+}

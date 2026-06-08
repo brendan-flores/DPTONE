@@ -1,24 +1,27 @@
-"use client"
+"use client";
 
-import React, { createContext, useContext, useState, ReactNode, useRef } from 'react';
-import { db } from '@/lib/firebase';
-import { useAuth } from './AuthContext';
-import { collection, doc, setDoc, getDocs, deleteDoc, onSnapshot } from 'firebase/firestore';
-import { useToast } from '@/hooks/use-toast';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  type ReactNode,
+} from "react";
+import { useAuth } from "./AuthContext";
+import { useToast } from "@/hooks/use-toast";
+import {
+  type CartItem,
+  fetchUserCart,
+  upsertCartItem,
+  deleteCartItem,
+  clearUserCart,
+  subscribeUserCart,
+} from "@/lib/storefront/cart";
 
-// Define the shape of a product in the cart
-export interface CartItem {
-  id: string;
-  name: string;
-  image: string;
-  price: string; // Or number, depending on how you want to handle currency
-  quantity: number;
-  selectedSize?: string; // Optional, if products have sizes
-  color?: string; // Optional, if products have colors
-  selectedColor?: string; // Optional, for user-selected color
-}
+export type { CartItem };
 
-// Define the shape of the CartContext
 interface CartContextType {
   cartItems: CartItem[];
   addToCart: (product: CartItem) => void;
@@ -31,10 +34,8 @@ interface CartContextType {
   removeFromCartByIds: (ids: (number | string)[]) => void;
 }
 
-// Create the context with a default undefined value
 const CartContext = createContext<CartContextType | undefined>(undefined);
 
-// CartProvider component to wrap your application
 export const CartProvider = ({ children }: { children: ReactNode }) => {
   const { user } = useAuth();
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
@@ -43,80 +44,102 @@ export const CartProvider = ({ children }: { children: ReactNode }) => {
   const { toast } = useToast();
   const addedItemRef = useRef<CartItem | null>(null);
 
-  // Load cart from Firestore on login
-  React.useEffect(() => {
-    if (user) {
-      const cartRef = collection(db, 'users', user.uid, 'cartProducts');
-      setCartLoading(true);
-      const unsubscribe = onSnapshot(cartRef, (snapshot) => {
-        const items: CartItem[] = [];
-        snapshot.forEach(doc => items.push(doc.data() as CartItem));
-        setCartItems(items);
-        setCartLoading(false);
-      });
-      return () => unsubscribe();
-    } else {
+  const loadCart = useCallback(async () => {
+    if (!user) {
       setCartItems([]);
+      setCartLoading(false);
+      return;
+    }
+    try {
+      setCartItems(await fetchUserCart(user.uid));
+    } catch (err) {
+      console.error("Failed to load cart:", err);
+      setCartItems([]);
+    } finally {
       setCartLoading(false);
     }
   }, [user]);
 
+  useEffect(() => {
+    const onAdmin =
+      typeof window !== "undefined" &&
+      window.location.pathname.startsWith("/admin");
+    if (onAdmin) {
+      setCartItems([]);
+      setCartLoading(false);
+      return;
+    }
+
+    if (!user) {
+      setCartItems([]);
+      setCartLoading(false);
+      return;
+    }
+
+    setCartLoading(true);
+    void loadCart();
+    const unsubscribe = subscribeUserCart(user.uid, () => {
+      void loadCart();
+    });
+    return unsubscribe;
+  }, [user, loadCart]);
+
   const calculateTotal = () => {
-    return cartItems.reduce((total, item) => {
-      let price: number;
-      if (typeof item.price === 'string') {
-        price = parseFloat(item.price.replace(/[^\d.]/g, ''));
-      } else {
-        price = Number(item.price);
-      }
-      return total + (price * item.quantity);
-    }, 0).toFixed(2);
+    return cartItems
+      .reduce((total, item) => {
+        const price =
+          typeof item.price === "string"
+            ? parseFloat(item.price.replace(/[^\d.]/g, ""))
+            : Number(item.price);
+        return total + price * item.quantity;
+      }, 0)
+      .toFixed(2);
   };
 
   const addToCart = (productToAdd: CartItem) => {
     addedItemRef.current = null;
     setCartItems((prevItems) => {
-      const existingItem = prevItems.find(item => item.id === productToAdd.id && item.selectedSize === productToAdd.selectedSize);
-      let newItems;
-      if (existingItem) {
-        newItems = prevItems.map(item =>
-          item.id === productToAdd.id && item.selectedSize === productToAdd.selectedSize
-            ? { ...item, quantity: item.quantity + productToAdd.quantity }
-            : item
-        );
-        addedItemRef.current = { ...existingItem, quantity: productToAdd.quantity };
-      } else {
-        newItems = [...prevItems, { ...productToAdd, quantity: productToAdd.quantity || 1 }];
-        addedItemRef.current = { ...productToAdd, quantity: productToAdd.quantity || 1 };
-      }
-      // Only update the changed item in Firestore
+      const existingItem = prevItems.find(
+        (item) =>
+          item.id === productToAdd.id &&
+          item.selectedSize === productToAdd.selectedSize
+      );
+      const quantity = existingItem
+        ? existingItem.quantity + productToAdd.quantity
+        : productToAdd.quantity || 1;
+
+      const newItems = existingItem
+        ? prevItems.map((item) =>
+            item.id === productToAdd.id &&
+            item.selectedSize === productToAdd.selectedSize
+              ? { ...item, quantity }
+              : item
+          )
+        : [...prevItems, { ...productToAdd, quantity }];
+
+      addedItemRef.current = { ...productToAdd, quantity };
+
       if (user) {
-        const cartRef = collection(db, 'users', user.uid, 'cartProducts');
-        const docRef = doc(cartRef, `${productToAdd.id}-${productToAdd.selectedSize || 'default'}`);
-        const firestoreItem = { ...productToAdd, quantity: existingItem ? (existingItem.quantity + productToAdd.quantity) : (productToAdd.quantity || 1) };
-        if (firestoreItem.selectedColor === undefined) {
-          delete firestoreItem.selectedColor;
-        }
-        setDoc(docRef, firestoreItem)
-          .then(() => {
-            console.log('[addToCart] Successfully added to Firestore');
-          })
-          .catch((err) => {
-            console.error('[addToCart] Firestore error:', err);
-          });
-      } else {
-        console.warn('[addToCart] No user found, not writing to Firestore');
+        setIsCartSyncing(true);
+        void upsertCartItem(user.uid, productToAdd, quantity)
+          .catch((err) => console.error("[addToCart]", err))
+          .finally(() => setIsCartSyncing(false));
       }
+
       return newItems;
     });
-    // Show toast notification for add to cart (after state update)
+
     setTimeout(() => {
       const addedItem = addedItemRef.current;
       if (addedItem) {
         toast({
-          title: 'Added to cart',
-          description: `${addedItem.quantity} ${addedItem.name}${addedItem.selectedSize ? ` (${addedItem.selectedSize}` : ''}${addedItem.selectedColor ? `, ${addedItem.selectedColor}` : ''}${addedItem.selectedSize ? ')' : ''} added to cart!`,
-          variant: 'success',
+          title: "Added to cart",
+          description: `${addedItem.quantity} ${addedItem.name}${
+            addedItem.selectedSize ? ` (${addedItem.selectedSize}` : ""
+          }${addedItem.selectedColor ? `, ${addedItem.selectedColor}` : ""}${
+            addedItem.selectedSize ? ")" : ""
+          } added to cart!`,
+          variant: "success",
         });
       }
     }, 0);
@@ -124,12 +147,10 @@ export const CartProvider = ({ children }: { children: ReactNode }) => {
 
   const removeFromCart = (productId: string) => {
     setCartItems((prevItems) => {
-      const itemToRemove = prevItems.find(item => item.id === productId);
-      const newItems = prevItems.filter(item => item.id !== productId);
+      const itemToRemove = prevItems.find((item) => item.id === productId);
+      const newItems = prevItems.filter((item) => item.id !== productId);
       if (user && itemToRemove) {
-        const cartRef = collection(db, 'users', user.uid, 'cartProducts');
-        const docRef = doc(cartRef, `${itemToRemove.id}-${itemToRemove.selectedSize || 'default'}`);
-        deleteDoc(docRef);
+        void deleteCartItem(user.uid, itemToRemove).catch(console.error);
       }
       return newItems;
     });
@@ -137,18 +158,17 @@ export const CartProvider = ({ children }: { children: ReactNode }) => {
 
   const updateQuantity = (productId: string, quantity: number) => {
     setCartItems((prevItems) => {
-      const newItems = prevItems.map(item =>
+      const newItems = prevItems.map((item) =>
         item.id === productId
           ? { ...item, quantity: Math.max(1, quantity) }
           : item
       );
-      // Only update the changed item in Firestore
       if (user) {
-        const updatedItem = newItems.find(item => item.id === productId);
+        const updatedItem = newItems.find((item) => item.id === productId);
         if (updatedItem) {
-          const cartRef = collection(db, 'users', user.uid, 'cartProducts');
-          const docRef = doc(cartRef, `${updatedItem.id}-${updatedItem.selectedSize || 'default'}`);
-          setDoc(docRef, updatedItem);
+          void upsertCartItem(user.uid, updatedItem, updatedItem.quantity).catch(
+            console.error
+          );
         }
       }
       return newItems;
@@ -158,41 +178,46 @@ export const CartProvider = ({ children }: { children: ReactNode }) => {
   const clearCart = () => {
     setCartItems([]);
     if (user) {
-      const cartRef = collection(db, 'users', user.uid, 'cartProducts');
-      // Remove all docs in the cart
-      // (optional: you could optimize this with a batch delete)
-      // For now, just rely on onSnapshot to clear UI
+      void clearUserCart(user.uid).catch(console.error);
     }
   };
 
   const removeFromCartByIds = (ids: (number | string)[]) => {
     setCartItems((prevItems) => {
-      const newItems = prevItems.filter(item => !ids.includes(item.id));
+      const removed = prevItems.filter((item) => ids.includes(item.id));
+      const newItems = prevItems.filter((item) => !ids.includes(item.id));
       if (user) {
-        const cartRef = collection(db, 'users', user.uid, 'cartProducts');
-        prevItems.forEach(item => {
-          if (ids.includes(item.id)) {
-            const docRef = doc(cartRef, `${item.id}-${item.selectedSize || 'default'}`);
-            deleteDoc(docRef);
-          }
-        });
+        for (const item of removed) {
+          void deleteCartItem(user.uid, item).catch(console.error);
+        }
       }
       return newItems;
     });
   };
 
   return (
-    <CartContext.Provider value={{ cartItems, addToCart, removeFromCart, updateQuantity, calculateTotal, clearCart, isCartSyncing, cartLoading, removeFromCartByIds }}>
+    <CartContext.Provider
+      value={{
+        cartItems,
+        addToCart,
+        removeFromCart,
+        updateQuantity,
+        calculateTotal,
+        clearCart,
+        isCartSyncing,
+        cartLoading,
+        removeFromCartByIds,
+      }}
+    >
       {children}
     </CartContext.Provider>
   );
 };
 
-// Custom hook to use the CartContext
 export const useCart = () => {
   const context = useContext(CartContext);
   if (context === undefined) {
-    throw new Error('useCart must be used within a CartProvider');
+    throw new Error("useCart must be used within a CartProvider");
   }
   return context;
-}; 
+};

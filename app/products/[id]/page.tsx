@@ -6,8 +6,12 @@ import { Button } from '@/components/ui/button';
 import Link from 'next/link';
 import { useState, useEffect, useRef } from 'react';
 import { useCart } from '@/context/CartContext';
-import { db } from '@/lib/firebase';
-import { doc, getDoc, collection, query, orderBy, getDocs, onSnapshot } from 'firebase/firestore';
+import {
+  fetchStorefrontProductById,
+  fetchProductReviews,
+  fetchProductRatingSummary,
+  subscribeStorefrontProducts,
+} from '@/lib/storefront/products';
 import '../../../styles/slide-animations.css';
 import { useAuth } from '@/context/AuthContext';
 import { Star } from 'lucide-react';
@@ -52,13 +56,15 @@ export default function ProductDetailPage() {
   const { user } = useAuth();
 
   useEffect(() => {
-    const docRef = doc(db, 'adminProducts', productId);
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
+    let cancelled = false;
+
+    const loadProduct = async () => {
+      const data = await fetchStorefrontProductById(productId);
+      if (cancelled) return;
+      if (data) {
         setProduct(data);
         setSelectedSize(undefined);
-        if (data.imageUrls && data.imageUrls.length > 0) {
+        if (data.imageUrls.length > 0) {
           setMainImage(data.imageUrls[0]);
           setMainImageIdx(0);
         } else if (data.imageUrl) {
@@ -68,35 +74,30 @@ export default function ProductDetailPage() {
       } else {
         setProduct(null);
       }
-    });
-    // Ratings listener
-    const ratingsCollectionRef = collection(db, 'adminProducts', productId, 'ratings');
-    const q = query(ratingsCollectionRef, orderBy('timestamp', 'desc'));
-    const unsubscribeRatings = onSnapshot(q, (querySnapshot) => {
-      const fetchedRatings = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setRatings(fetchedRatings);
-    });
-    return () => {
-      unsubscribe();
-      unsubscribeRatings();
     };
-  }, [productId]);
 
-  useEffect(() => {
-    // Fetch average rating and review count from AdminAnalytics/averageRating/averageRating/{productId}
-    const fetchAverageRating = async () => {
-      const avgDocRef = doc(db, 'AdminAnalytics', 'averageRating', 'averageRating', productId);
-      const avgDocSnap = await getDoc(avgDocRef);
-      if (avgDocSnap.exists()) {
-        const avgData = avgDocSnap.data();
-        setAverageRating(Number(avgData.averageRating).toFixed(1));
-        setReviewCount(avgData.reviewCount || 0);
-      } else {
-        setAverageRating('0.0');
-        setReviewCount(0);
-      }
+    const loadReviews = async () => {
+      const [reviews, summary] = await Promise.all([
+        fetchProductReviews(productId),
+        fetchProductRatingSummary(productId),
+      ]);
+      if (cancelled) return;
+      setRatings(reviews);
+      setAverageRating(summary.averageRating.toFixed(1));
+      setReviewCount(summary.reviewCount);
     };
-    fetchAverageRating();
+
+    void loadProduct();
+    void loadReviews();
+
+    const unsub = subscribeStorefrontProducts(() => {
+      void loadProduct();
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
   }, [productId]);
 
   // Add this helper to get available stock for selected size
@@ -590,7 +591,11 @@ export default function ProductDetailPage() {
                           </span>
                         </div>
                         <div className="text-[#cbd5e1] text-sm mb-1">{review.feedback || <span className="italic text-[#64748b]">No comment</span>}</div>
-                        <div className="text-xs text-[#64748b]">{review.timestamp && review.timestamp.toDate ? review.timestamp.toDate().toLocaleString() : ''}</div>
+                        <div className="text-xs text-[#64748b]">
+                          {review.timestamp
+                            ? new Date(review.timestamp).toLocaleString()
+                            : ""}
+                        </div>
                       </div>
                     </div>
                   ))}

@@ -8,12 +8,9 @@ import { useCart } from '@/context/CartContext';
 import { useRouter, usePathname } from 'next/navigation';
 import Image from 'next/image';
 import { useAuth } from '@/context/AuthContext';
-import { db } from '@/lib/firebase';
-import { collection, getDocs, onSnapshot } from 'firebase/firestore';
-import { signOut } from "firebase/auth";
-import { auth } from "@/lib/firebase";
-
-const ADMIN_UID = "1BeqoY3h5gTa4LBUsAiaDLHHhnT2";
+import { LOGO_URL } from "@/lib/assets";
+import { useStorefrontProducts } from "@/hooks/useStorefrontProducts";
+import { supabase } from "@/lib/supabase";
 
 export default function Header() {
   const { cartItems } = useCart();
@@ -22,27 +19,42 @@ export default function Header() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [allProducts, setAllProducts] = useState<any[]>([]);
+  const { products: allProducts } = useStorefrontProducts();
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isBrandDropdownOpen, setIsBrandDropdownOpen] = useState(false);
   const pathname = usePathname();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Check if we're on the admin page
-  const isAdminPage = pathname === '/admin';
-  const isAdmin = user && user.uid === ADMIN_UID;
+  const isAdminPage = pathname?.startsWith("/admin") ?? false;
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  // Fetch all products from Firestore once on mount
   useEffect(() => {
-    const unsubscribe = onSnapshot(collection(db, 'adminProducts'), (querySnapshot) => {
-      const items: any[] = [];
-      querySnapshot.forEach((docSnap) => {
-        items.push({ id: docSnap.id, ...docSnap.data() });
-      });
-      setAllProducts(items);
-    });
-    return () => unsubscribe();
-  }, []);
+    let cancelled = false;
+    async function checkAdmin() {
+      if (!user?.uid) {
+        setIsAdmin(false);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("admin_users")
+        .select("user_id")
+        .eq("user_id", user.uid)
+        .eq("is_active", true)
+        .maybeSingle();
+      if (cancelled) return;
+      if (error) {
+        setIsAdmin(false);
+        return;
+      }
+      setIsAdmin(Boolean(data?.user_id));
+    }
+
+    checkAdmin();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,7 +93,7 @@ export default function Header() {
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await supabase.auth.signOut();
       setMobileMenuOpen(false);
       window.location.href = "/";
     } catch (error) {
@@ -112,7 +124,7 @@ export default function Header() {
             <div className="flex items-center">
               <Link href="/" className="flex items-center mr-4 flex-shrink-0">
                 <Image
-                  src="https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/DPT%20ONE%20LOGO/DPTONELOGO.png"
+                  src={LOGO_URL}
                   alt="DPT ONE Logo"
                   width={60}
                   height={60}
@@ -143,7 +155,7 @@ export default function Header() {
             </div>
             {/* Right: Profile & Cart */}
             <div className="flex items-center space-x-4 ml-4">
-              {user && user.uid !== ADMIN_UID && <UserProfile />}
+              {user && !isAdmin && <UserProfile />}
               <Link href="/cart" className="relative flex items-center justify-center">
                 <ShoppingCart className="h-6 w-6 text-white hover:text-[#60A5FA] transition-colors" />
                 {cartItems.length > 0 && (
@@ -160,7 +172,7 @@ export default function Header() {
             <div className="flex items-center">
               <Link href="/" className="flex items-center mr-4 flex-shrink-0">
                 <Image
-                  src="https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/DPT%20ONE%20LOGO/DPTONELOGO.png"
+                  src={LOGO_URL}
                   alt="DPT ONE Logo"
                   width={60}
                   height={60}
@@ -255,7 +267,7 @@ export default function Header() {
             )}
             {/* User Profile & Cart */}
             <div className="flex items-center space-x-4 ml-4">
-              {user && user.uid !== ADMIN_UID && <UserProfile />}
+              {user && !isAdmin && <UserProfile />}
               {!isAdminPage && !isAdmin && (
                 <Link href="/cart" className="relative flex items-center justify-center">
                   <ShoppingCart className="h-6 w-6 text-white hover:text-[#60A5FA] transition-colors" />
@@ -281,7 +293,7 @@ export default function Header() {
           {/* Left: Logo */}
           <Link href="/" className="flex items-center">
             <Image
-              src="https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/DPT%20ONE%20LOGO/DPTONELOGO.png"
+              src={LOGO_URL}
               alt="DPT ONE Logo"
               width={60}
               height={60}

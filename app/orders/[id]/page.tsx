@@ -9,9 +9,17 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/context/AuthContext";
 import { ArrowLeft, Package, Truck, CheckCircle, Clock, MapPin, Phone, Mail, CreditCard, Download, Share2 } from "lucide-react";
-import { doc, getDoc, collection, getDocs, onSnapshot, updateDoc, serverTimestamp, addDoc, query, where, setDoc } from "firebase/firestore";
-import { db } from "@/lib/firebase";
 import { useParams, useRouter } from 'next/navigation';
+import {
+  fetchUserOrder,
+  confirmOrderReceived,
+  cancelUserOrder,
+  canCustomerCancelOrder,
+  returnUserOrder,
+  rateOrderItems,
+  type StorefrontOrder,
+} from "@/lib/storefront/orders";
+import { subscribeUserOrders } from "@/lib/storefront/orderRealtime";
 import React from 'react';
 import { Star } from "lucide-react";
 import jsPDF from "jspdf";
@@ -19,6 +27,7 @@ import jsPDF from "jspdf";
 
 interface OrderItem {
   id: string;
+  productId?: string;
   name: string;
   price: number;
   quantity: number;
@@ -58,7 +67,47 @@ interface Order {
   notes?: string;
   processedDate?: Date;
   shippedDate?: Date;
-  statusHistory?: { status: string; timestamp: any }[];
+  statusHistory?: { status: string; timestamp: string | Date }[];
+}
+
+function mapStorefrontToPageOrder(row: StorefrontOrder): Order {
+  const statusDate = (status: string) => {
+    const entry = row.statusHistory.find((h) => h.status === status);
+    if (!entry?.timestamp) return undefined;
+    const d = new Date(entry.timestamp);
+    return Number.isNaN(d.getTime()) ? undefined : d;
+  };
+
+  return {
+    id: row.id,
+    orderNumber: row.orderNumber,
+    orderDate: row.dateOrdered ?? new Date(),
+    status: (row.status === "rated" || row.status === "returned"
+      ? "completed"
+      : row.status) as Order["status"],
+    total: row.total,
+    subtotal: row.subtotal,
+    shipping: row.shipping,
+    tax: row.tax,
+    items: row.items,
+    shippingAddress: row.shippingAddress,
+    billingAddress: row.billingAddress ?? row.shippingAddress,
+    paymentMethod: row.paymentMethod,
+    paymentStatus: (row.paymentStatus || "pending") as Order["paymentStatus"],
+    trackingNumber: row.trackingNumber,
+    estimatedDelivery: row.estimatedDelivery ?? undefined,
+    deliveryDate: row.deliveredAt ?? undefined,
+    notes: row.notes,
+    processedDate: statusDate("processing"),
+    shippedDate: statusDate("shipped"),
+    statusHistory: row.statusHistory,
+  };
+}
+
+function parseHistoryTimestamp(timestamp: string | Date): Date {
+  if (timestamp instanceof Date) return timestamp;
+  const d = new Date(timestamp);
+  return Number.isNaN(d.getTime()) ? new Date() : d;
 }
 
 interface TrackingEvent {
@@ -69,7 +118,7 @@ interface TrackingEvent {
 }
 
 export default function OrderDetailsPage() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [order, setOrder] = useState<Order | null>(null);
   const [trackingEvents, setTrackingEvents] = useState<TrackingEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -88,69 +137,52 @@ export default function OrderDetailsPage() {
   const router = useRouter();
 
   useEffect(() => {
-    if (user) {
-      const orderRef = doc(db, 'users', user.uid, 'orders', orderId);
-      const unsubscribe = onSnapshot(orderRef, (orderSnap) => {
-        if (orderSnap.exists()) {
-          const data = orderSnap.data();
-          const fetchedOrder: Order = {
-            id: orderSnap.id,
-            orderNumber: data.orderNumber,
-            orderDate: (() => {
-              const d = data.orderDate;
-              if (d && typeof d.toDate === 'function') return d.toDate();
-              if (typeof d === 'string' || typeof d === 'number') {
-                const dt = new Date(d);
-                if (!isNaN(dt.getTime())) return dt;
-              }
-              return undefined;
-            })(),
-            status: (data.status === 'rated' || data.status === 'returned') ? 'completed' : data.status,
-            total: data.total,
-            subtotal: data.subtotal,
-            shipping: data.shipping,
-            tax: data.tax,
-            items: data.items || [],
-            shippingAddress: data.shippingAddress,
-            billingAddress: data.billingAddress,
-            paymentMethod: data.paymentMethod,
-            paymentStatus: data.paymentStatus,
-            trackingNumber: data.trackingNumber,
-            estimatedDelivery: data.estimatedDelivery?.toDate(),
-            deliveryDate: (() => {
-              if (data.actualDelivery && typeof data.actualDelivery.toDate === 'function') return data.actualDelivery.toDate();
-              if (data.actualDelivery) return new Date(data.actualDelivery);
-              if (data.deliveredAt && typeof data.deliveredAt.toDate === 'function') return data.deliveredAt.toDate();
-              if (data.deliveredAt) return new Date(data.deliveredAt);
-              return undefined;
-            })(),
-            notes: data.notes,
-            processedDate: data.processedDate?.toDate(),
-            shippedDate: data.shippedDate?.toDate(),
-            statusHistory: data.statusHistory || [],
-          };
-          console.log(`Order ${data.orderNumber}: Raw status from Firestore: ${data.status}, actionCompleted: ${data.actionCompleted}`);
-          setOrder(fetchedOrder);
-          setOrderItems(data.items || []);
-          setOrderReceived(!!data.orderReceived);
-          setActionCompleted(!!data.actionCompleted);
+    if (authLoading) return;
+
+    if (!user) {
+      setOrder(null);
+      setOrderItems([]);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadOrder = async () => {
+      try {
+        const row = await fetchUserOrder(user.uid, orderId);
+        if (cancelled) return;
+        if (row) {
+          const mapped = mapStorefrontToPageOrder(row);
+          setOrder(mapped);
+          setOrderItems(mapped.items);
+          setOrderReceived(!!row.orderReceived);
+          setActionCompleted(!!row.actionCompleted);
         } else {
           setOrder(null);
           setOrderItems([]);
         }
-        setLoading(false);
-      }, (error) => {
+      } catch (error) {
         console.error("Error fetching order details:", error);
-        setOrder(null);
-        setOrderItems([]);
-        setLoading(false);
-      });
-      return () => unsubscribe();
-    } else {
-      setLoading(false);
-      setOrderItems([]);
-    }
-  }, [user, orderId]);
+        if (!cancelled) {
+          setOrder(null);
+          setOrderItems([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void loadOrder();
+    const unsubscribe = subscribeUserOrders(user.uid, () => {
+      void loadOrder();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [user, authLoading, orderId]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -197,194 +229,86 @@ export default function OrderDetailsPage() {
   const handleOrderReceived = async () => {
     if (!user || !order) return;
     try {
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'delivered', deliveredAt: serverTimestamp(), orderReceived: true, paymentStatus: 'paid' });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      if (globalOrderId) {
-        // const globalOrderRef = doc(db, 'productsOrder', globalOrderId);
-        // await updateDoc(globalOrderRef, { ... })
-        // Instead, use adminProducts/*/productsOrder
-        // TODO: Implement logic to update in adminProducts/*/productsOrder
-      }
+      await confirmOrderReceived(order.id);
       setOrderReceived(true);
-    } catch (err) {
-      alert('Failed to update order status. Please try again.');
+      setOrder({
+        ...order,
+        status: "delivered",
+        paymentStatus: "paid",
+        deliveryDate: new Date(),
+      });
+    } catch {
+      alert("Failed to update order status. Please try again.");
     }
   };
 
-  // Update handleReturnRefund to store in orderDetails and show Buy again
   const handleReturnRefund = async (reason: string) => {
     if (!user || !order) return;
     try {
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'returned/refunded' });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      const adminProductId = userOrderSnap.data()?.adminProductId;
-      if (globalOrderId && adminProductId) {
-        const adminOrderRef = doc(db, 'adminProducts', adminProductId, 'productsOrder', globalOrderId);
-        await updateDoc(adminOrderRef, { status: 'returned/refunded' });
-      }
-      // Store the return/refund reason in a new collection
-      const returnReasonsRef = collection(db, 'returnRefundReasons');
-      await addDoc(returnReasonsRef, {
-        userId: user.uid,
-        orderId: order.id,
-        reason,
-        timestamp: serverTimestamp(),
-        orderNumber: order.orderNumber,
-        email: user.email || null
-      });
+      await returnUserOrder(order.id, order.items, reason, user.uid);
       setActionCompleted(true);
-      router.push('/orders');
-    } catch (err) {
-      alert('Failed to update order status. Please try again.');
+      router.push("/orders");
+    } catch {
+      alert("Failed to update order status. Please try again.");
     }
   };
 
-  // Update handleRateOrder to store in orderDetails and show Buy again
-  const handleRateOrder = async (rating: number, feedback: string) => {
+  const handleRateOrder = async (rating: number, feedbackText: string) => {
     if (!user || !order) return;
     try {
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'completed', rating, feedback, actionCompleted: true });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      const adminProductId = userOrderSnap.data()?.adminProductId;
-      if (globalOrderId && adminProductId) {
-        const adminOrderRef = doc(db, 'adminProducts', adminProductId, 'productsOrder', globalOrderId);
-        await updateDoc(adminOrderRef, { status: 'completed' });
-      }
-      for (const item of order.items) {
-        const q = query(collection(db, "adminProducts"), where("name", "==", item.name));
-        const querySnapshot = await getDocs(q);
-        if (!querySnapshot.empty) {
-          const productDoc = querySnapshot.docs[0];
-          const productId = productDoc.id;
-          await addDoc(collection(db, "adminProducts", productId, "ratings"), {
-            userId: user.uid,
-            orderId: order.id,
-            rating,
-            feedback,
-            timestamp: serverTimestamp(),
-            orderNumber: order.orderNumber,
-            email: user.email || null,
-            productName: item.name,
-            productId: productId
-          });
-          await addDoc(collection(db, "AdminAnalytics", "main", "reviews"), {
-            userId: user.uid,
-            userEmail: user.email || null,
-            productId: productId,
-            productName: item.name,
-            rating,
-            feedback,
-            timestamp: serverTimestamp(),
-            orderId: order.id,
-            orderNumber: order.orderNumber
-          });
-          const ratingsSnapshot = await getDocs(collection(db, "adminProducts", productId, "ratings"));
-          const ratingsList = ratingsSnapshot.docs.map(doc => doc.data().rating).filter(r => typeof r === 'number');
-          const reviewCount = ratingsList.length;
-          const averageRating = reviewCount > 0 ? (ratingsList.reduce((a, b) => a + b, 0) / reviewCount) : 0;
-          const avgDocRef = doc(db, 'AdminAnalytics', 'averageRating', 'averageRating', productId);
-          await setDoc(avgDocRef, {
-            averageRating,
-            reviewCount,
-            productId,
-            productName: item.name
-          });
-        }
-      }
+      await rateOrderItems(
+        order.id,
+        order.items,
+        rating,
+        feedbackText,
+        user.uid,
+        user.email,
+        order.orderNumber
+      );
       setActionCompleted(true);
-      router.push('/orders');
+      router.push("/orders");
     } catch (err) {
       console.error("Failed to update order status or add rating:", err);
-      alert('Failed to update order status or add rating. Please try again.');
+      alert("Failed to update order status or add rating. Please try again.");
     }
   };
 
-  // Helper to call handleReturnRefund with the entered reason
   const handleReturnRefundWithReason = async () => {
     if (!user || !order) return;
     try {
-      for (const item of order.items) {
-        const q = query(collection(db, "adminProducts"), where("name", "==", item.name));
-        const querySnapshot = await getDocs(q);
-        if (!querySnapshot.empty) {
-          const productDoc = querySnapshot.docs[0];
-          const productId = productDoc.id;
-          await addDoc(collection(db, "adminProducts", productId, "returnRefundReasons"), {
-            userId: user.uid,
-            orderId: order.id,
-            reason: returnReason,
-            price: item.price,
-            timestamp: serverTimestamp(),
-            orderNumber: order.orderNumber,
-            email: user.email || null,
-            productName: item.name,
-            productId: productId
-          });
-        }
-      }
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'returned/refunded', actionCompleted: true });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      const adminProductId = userOrderSnap.data()?.adminProductId;
-      if (globalOrderId && adminProductId) {
-        const adminOrderRef = doc(db, 'adminProducts', adminProductId, 'productsOrder', globalOrderId);
-        await updateDoc(adminOrderRef, { status: 'returned/refunded' });
-      }
+      await returnUserOrder(
+        order.id,
+        order.items,
+        returnReason,
+        user.uid
+      );
       setActionCompleted(true);
-      router.push('/orders');
+      router.push("/orders");
     } catch (err) {
       console.error("Failed to update order status or add return reason:", err);
-      alert('Failed to update order status or add return reason. Please try again.');
+      alert("Failed to update order status or add return reason. Please try again.");
     }
     setShowReturnForm(false);
-    setReturnReason('');
+    setReturnReason("");
   };
 
-  // Cancel Order handler
   const handleCancelOrder = async () => {
     if (!user || !order) return;
-    if (order.status !== 'pending') {
-      alert('Order cannot be canceled. It is already being processed or shipped.');
+    if (!canCustomerCancelOrder(order.status)) {
+      alert(
+        "This order can no longer be cancelled. Only pending orders can be cancelled."
+      );
       return;
     }
     try {
-      // Update user's order status
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'cancelled' });
-      // Update admin's order status
-      // Find globalOrderId (admin order id) from user order
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      if (globalOrderId) {
-        // Find the adminProductId for this order
-        // Try to get it from user order if available
-        const adminProductId = userOrderSnap.data()?.adminProductId;
-        if (adminProductId) {
-          const adminOrderRef = doc(db, 'adminProducts', adminProductId, 'productsOrder', globalOrderId);
-          await updateDoc(adminOrderRef, { status: 'cancelled' });
-        } else {
-          // Fallback: search all adminProducts for the order
-          const adminProductsSnap = await getDocs(collection(db, 'adminProducts'));
-          for (const productDoc of adminProductsSnap.docs) {
-            const adminOrderRef = doc(db, 'adminProducts', productDoc.id, 'productsOrder', globalOrderId);
-            const adminOrderSnap = await getDoc(adminOrderRef);
-            if (adminOrderSnap.exists()) {
-              await updateDoc(adminOrderRef, { status: 'cancelled' });
-              break;
-            }
-          }
-        }
-      }
-      setOrder({ ...order, status: 'cancelled' });
+      await cancelUserOrder(order.id);
+      setOrder({ ...order, status: "cancelled" });
     } catch (err) {
-      alert('Failed to cancel order. Please try again.');
+      alert(
+        err instanceof Error
+          ? err.message
+          : "Failed to cancel order. Please try again."
+      );
     }
   };
 
@@ -504,7 +428,7 @@ export default function OrderDetailsPage() {
     return `${mm}/${dd}/${yyyy}`;
   }
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-[#101828] flex items-center justify-center text-[#60A5FA]">
         <div className="text-center">
@@ -610,7 +534,7 @@ export default function OrderDetailsPage() {
                         <div className="font-medium flex items-center gap-1">
                           {entry.status.charAt(0).toUpperCase() + entry.status.slice(1)}
                         </div>
-                        <div className="text-xs text-[#93c5fd]">{formatDate(entry.timestamp?.toDate ? entry.timestamp.toDate() : entry.timestamp)}</div>
+                        <div className="text-xs text-[#93c5fd]">{formatDate(parseHistoryTimestamp(entry.timestamp))}</div>
                       </div>
                     </div>
                   ))
@@ -704,7 +628,7 @@ export default function OrderDetailsPage() {
                   </>
                 )}
                 {/* Cancel Order button for all except cancelled/completed */}
-                {order.status === 'pending' && (
+                {canCustomerCancelOrder(order.status) && (
                   <Button
                     className="bg-red-600 hover:bg-red-700 text-white px-6 mt-4"
                     onClick={handleCancelOrder}
@@ -717,7 +641,9 @@ export default function OrderDetailsPage() {
                     className="bg-blue-600 hover:bg-blue-700 text-white px-6 mt-4"
                     onClick={() => {
                       if (order && order.items && order.items.length > 0) {
-                        router.push(`/products/${order.items[0].id}`);
+                        router.push(
+                          `/products/${order.items[0].productId ?? order.items[0].id}`
+                        );
                       } else {
                         router.push('/products'); // Fallback if no items
                       }

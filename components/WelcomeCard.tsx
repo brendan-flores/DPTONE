@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { LOGO_URL, WELCOME_MODAL_IMAGE_URL } from "@/lib/assets";
 import { useState, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 
@@ -41,7 +42,7 @@ export default function WelcomeCard() {
         {/* Left: Image */}
         <div className="w-full sm:w-1/2 min-h-[120px] sm:min-h-[340px] bg-[#101828] flex items-center justify-center border-b-2 sm:border-b-0 sm:border-r-2 border-[#60A5FA] relative overflow-hidden">
           <img
-            src="https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/Welcome%20Modal%20Image/welcomeModalImage.png"
+            src={WELCOME_MODAL_IMAGE_URL}
             alt="Welcome"
             style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
             onError={e => { e.currentTarget.style.display = 'none'; e.currentTarget.parentElement?.insertAdjacentHTML('beforeend', '<span style=\'color:#60A5FA;font-size:1.2rem;\'>Image not found</span>'); }}
@@ -53,7 +54,7 @@ export default function WelcomeCard() {
           {/* Animated Logo */}
           <div className="mb-1 sm:mb-4 animate-bounce mt-1 flex justify-center items-center">
             <Image
-              src="https://ltfzekatcjpltiighukw.supabase.co/storage/v1/object/public/product-images/DPT%20ONE%20LOGO/DPTONELOGO.png"
+              src={LOGO_URL}
               alt="DPT ONE Logo"
               width={48}
               height={48}

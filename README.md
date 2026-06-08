@@ -1,49 +1,76 @@
-# Sisig Lovers E-commerce
+# DPT ONE E-commerce
 
-This is a simple e-commerce web app built with Next.js. It lets users browse products, add them to a cart, and checkout. There is also an admin area for managing products and orders.
+Next.js storefront and admin panel for DPT ONE — browse products, cart, checkout (COD / QR Ph), orders, and admin management.
 
 ## Features
-- User authentication (login, profile)
-- Browse products by brand or search
-- Add products to cart
-- Checkout with delivery and payment options (GCash, COD)
-- Order history and order rating
-- Admin dashboard for adding products and viewing orders
-- Responsive design for mobile and desktop
+
+- Customer auth (Supabase email + OTP)
+- Separate admin auth (`/admin`)
+- Product catalog with realtime updates
+- Persistent cart (Supabase `cart_items`)
+- Checkout with COD and personal QR Ph payment
+- Order history, ratings, returns
+- Admin: products, orders, activities, analytics
 
 ## Tech Stack
-- **Next.js** (React framework)
-- **Firebase** (for database and authentication)
-- **Supabase** (for image storage)
-- **Tailwind CSS** (for styling)
+
+- **Next.js 16** (App Router)
+- **Supabase** — auth, PostgreSQL, storage, realtime
+- **Tailwind CSS** + shadcn/ui
 
 ## Getting Started
 
 ### 1. Install dependencies
-```
+
+```bash
 npm install
 ```
 
-### 2. Set up environment variables
-- You need Firebase and Supabase credentials. Create a `.env.local` file and add your keys.
+### 2. Environment variables
 
-### 3. Run the development server
-```
+Copy `.env.example` to `.env.local` and set:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+Optional: `SUPABASE_SERVICE_ROLE_KEY` (local admin scripts only — never expose to the client).
+
+### 3. Supabase setup
+
+Run `supabase/schema.sql` in the Supabase SQL Editor (idempotent).
+
+Create a public storage bucket: **`product-images`**.
+
+Add your admin user to `admin_users` after creating them in Supabase Auth.
+
+### 4. Run locally
+
+```bash
 npm run dev
 ```
-- Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+Open [http://localhost:3000](http://localhost:3000).
 
 ## Project Structure
-- `app/` - Main app pages (products, cart, checkout, admin, etc.)
-- `components/` - Reusable UI components
-- `context/` - State management (auth, cart)
-- `lib/` - Firebase and Supabase setup
-- `styles/` - Global and custom CSS
+
+```
+app/                    # Next.js routes (storefront + admin + API)
+components/             # UI components
+  admin/                # Admin shell, analytics, login
+  checkout/             # Checkout UI
+context/                # Auth, cart, admin analytics providers
+hooks/                  # Shared React hooks
+lib/
+  admin/                # Admin data layer (products, orders, analytics)
+  storefront/           # Customer data layer (products, cart, orders, checkout)
+  supabase.ts           # Customer Supabase client
+  supabase-admin.ts     # Admin Supabase client (separate session)
+  assets.ts             # Static asset URLs (logo, hero slider)
+supabase/
+  schema.sql            # Full database schema, RLS, RPCs, storage policies
+```
 
 ## Notes
-- You need to set up your own Firebase and Supabase projects for this to work.
-- This project is for learning and demo purposes.
 
----
-
-Enjoy shopping with DPT ONE by Sisig Lovers!
+- Customer and admin use **separate Supabase auth storage keys** — you can stay logged in on both at once.
+- Hero slider images: `product-images/product-images/Image Sliders/` in storage (see `lib/assets.ts`).

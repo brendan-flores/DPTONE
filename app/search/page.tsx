@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { db } from '@/lib/firebase';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { fetchStorefrontProducts } from '@/lib/storefront/products';
 import Image from "next/image";
 import Link from "next/link";
 
@@ -44,14 +43,8 @@ export default function SearchResultsPage() {
   useEffect(() => {
     const fetchProducts = async () => {
       setLoading(true);
-      // Fetch all products first, then filter client-side for includes()
-      const q = query(collection(db, 'adminProducts'));
-      const querySnapshot = await getDocs(q);
-      const allItems: any[] = [];
-      querySnapshot.forEach((docSnap) => {
-        allItems.push({ id: docSnap.id, ...docSnap.data() });
-      });
-
+      try {
+      const allItems = await fetchStorefrontProducts();
       const matchedItems = searchQuery
         ? allItems.filter(p => p.name?.toLowerCase().includes(searchQuery.toLowerCase()))
         : allItems;
@@ -73,7 +66,11 @@ export default function SearchResultsPage() {
             : !p.stock || Number(p.stock) === 0
         ).length
       );
-      setLoading(false);
+      } catch {
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
     };
     fetchProducts();
   }, [searchQuery]);

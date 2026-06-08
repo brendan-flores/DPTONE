@@ -9,51 +9,32 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/context/AuthContext";
-import { collection, query, where, orderBy, getDocs, onSnapshot, addDoc, updateDoc, doc, getDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import {
+  fetchUserOrders,
+  markOrderReceived,
+  updateUserOrderStatus,
+  type StorefrontOrder,
+} from "@/lib/storefront/orders";
+import { subscribeUserOrders } from "@/lib/storefront/orderRealtime";
 import { Calendar, Package, Search, Filter, Eye, Download } from "lucide-react";
 import { useRouter } from 'next/navigation';
 
 
-interface Order {
-  id: string;
-  orderNumber: string;
-  dateOrdered: Date | string | undefined;
-  status: 'pending' | 'processing' | 'shipped' | 'delivered' | 'cancelled' | 'completed' | 'returned/refunded';
-  total: number;
-  items: OrderItem[];
-  shippingAddress: Address;
-  paymentMethod: string;
-  trackingNumber?: string;
-  estimatedDelivery?: Date;
-  orderReceived?: boolean;
-  billingAddress?: Address;
-}
-
-interface OrderItem {
-  id: string;
-  name: string;
-  price: number;
-  quantity: number;
-  image: string;
-  size?: string;
-  color?: string;
-  selectedColor?: string;
-}
-
-interface Address {
-  firstName: string;
-  lastName: string;
-  address1: string;
-  address2?: string;
-  city: string;
-  region: string;
-  postalCode: string;
-  phone: string;
-}
+type Order = StorefrontOrder & {
+  dateOrdered?: Date | string | null;
+  status:
+    | "pending"
+    | "processing"
+    | "shipped"
+    | "delivered"
+    | "cancelled"
+    | "completed"
+    | "returned/refunded"
+    | string;
+};
 
 export default function OrdersPage() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const [orders, setOrders] = useState<Order[]>([]);
   const [filteredOrders, setFilteredOrders] = useState<Order[]>([]);
@@ -83,79 +64,45 @@ export default function OrdersPage() {
   ];
 
   useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-    if (user) {
-      // Fetch orders from per-user users/{userId}/orders subcollection in real-time
-      const fetchOrders = () => {
-        try {
-          const userOrdersRef = collection(db, 'users', user.uid, 'orders');
-          const q = query(
-            userOrdersRef,
-            orderBy('dateOrdered', 'desc')
-          );
-          unsubscribe = onSnapshot(q, (querySnapshot) => {
-            const fetchedOrders: Order[] = [];
-            querySnapshot.forEach((doc) => {
-              const data = doc.data();
-              let dateOrderedValue: Date | undefined = undefined;
-              if (data.dateOrdered && typeof data.dateOrdered.toDate === 'function') {
-                dateOrderedValue = data.dateOrdered.toDate();
-              } else if (typeof data.dateOrdered === 'string' || typeof data.dateOrdered === 'number') {
-                const d = new Date(data.dateOrdered);
-                if (!isNaN(d.getTime())) dateOrderedValue = d;
-              }
-              let deliveryDateValue: Date | undefined = undefined;
-              if (data.actualDelivery && typeof data.actualDelivery.toDate === 'function') {
-                deliveryDateValue = data.actualDelivery.toDate();
-              } else if (data.actualDelivery) {
-                deliveryDateValue = new Date(data.actualDelivery);
-              } else if (data.deliveredAt && typeof data.deliveredAt.toDate === 'function') {
-                deliveryDateValue = data.deliveredAt.toDate();
-              } else if (data.deliveredAt) {
-                deliveryDateValue = new Date(data.deliveredAt);
-              }
-              console.log(`Order ${data.orderNumber}: Original status ${data.status}, Transformed status: ${(data.status === 'rated' || data.status === 'returned') ? 'completed' : data.status}`);
-              fetchedOrders.push({
-                id: doc.id,
-                orderNumber: data.orderNumber,
-                dateOrdered: dateOrderedValue,
-                status: data.status,
-                total: data.total,
-                items: data.items || [],
-                shippingAddress: data.shippingAddress,
-                paymentMethod: data.paymentMethod,
-                trackingNumber: data.trackingNumber,
-                estimatedDelivery: data.estimatedDelivery && typeof data.estimatedDelivery.toDate === 'function'
-                  ? data.estimatedDelivery.toDate()
-                  : (data.estimatedDelivery ? new Date(data.estimatedDelivery) : undefined),
-                orderReceived: data.orderReceived,
-                billingAddress: data.billingAddress
-              });
-            });
-            setOrders(fetchedOrders);
-            setFilteredOrders(fetchedOrders);
-            setLoading(false);
-          }, (error) => {
-            console.error("Error fetching orders:", error);
-            setOrders([]);
-            setFilteredOrders([]);
-            setLoading(false);
-          });
-        } catch (error) {
-          console.error("Error fetching orders:", error);
-          setOrders([]);
-          setFilteredOrders([]);
-          setLoading(false);
-        }
-      };
-      fetchOrders();
-    } else {
+    if (authLoading) return;
+
+    if (!user) {
       setOrders([]);
       setFilteredOrders([]);
       setLoading(false);
+      return;
     }
-    return () => { if (unsubscribe) unsubscribe(); };
-  }, [user]);
+
+    let cancelled = false;
+
+    const loadOrders = async () => {
+      try {
+        const fetchedOrders = await fetchUserOrders(user.uid);
+        if (!cancelled) {
+          setOrders(fetchedOrders as Order[]);
+          setFilteredOrders(fetchedOrders as Order[]);
+        }
+      } catch (error) {
+        console.error("Error fetching orders:", error);
+        if (!cancelled) {
+          setOrders([]);
+          setFilteredOrders([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void loadOrders();
+    const unsubscribe = subscribeUserOrders(user.uid, () => {
+      void loadOrders();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [user, authLoading]);
 
   useEffect(() => {
     let filtered = orders;
@@ -242,60 +189,42 @@ export default function OrdersPage() {
   };
 
   // Add handler for return/refund
-  const handleReturnRefund = async (order: Order, reason: string) => {
+  const handleReturnRefund = async (order: Order, _reason: string) => {
     if (!user || !order) return;
     try {
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'completed' });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      if (globalOrderId) {
-        // Instead, use adminProducts/*/productsOrder
-        // TODO: Implement logic to add to adminProducts/*/productsOrder/{orderId}/orderDetails
-      }
-      setActionCompleted(prev => ({ ...prev, [order.id]: true }));
-    } catch (err) {
-      alert('Failed to update order status. Please try again.');
+      await updateUserOrderStatus(order.id, "completed");
+      setActionCompleted((prev) => ({ ...prev, [order.id]: true }));
+    } catch {
+      alert("Failed to update order status. Please try again.");
     }
   };
 
-  // Add handler for rate order
-  const handleRateOrder = async (order: Order, rating: number) => {
+  const handleRateOrder = async (order: Order, _rating: number) => {
     if (!user || !order) return;
     try {
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { status: 'completed' });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      if (globalOrderId) {
-        // Instead, use adminProducts/*/productsOrder
-        // TODO: Implement logic to update in adminProducts/*/productsOrder
-      }
-      setActionCompleted(prev => ({ ...prev, [order.id]: true }));
-    } catch (err) {
-      alert('Failed to update order status. Please try again.');
+      await updateUserOrderStatus(order.id, "completed");
+      setActionCompleted((prev) => ({ ...prev, [order.id]: true }));
+    } catch {
+      alert("Failed to update order status. Please try again.");
     }
   };
 
   const handleOrderReceived = async (order: Order) => {
     if (!user || !order) return;
     try {
-      const userOrderRef = doc(db, 'users', user.uid, 'orders', order.id);
-      await updateDoc(userOrderRef, { orderReceived: true });
-      const userOrderSnap = await getDoc(userOrderRef);
-      const globalOrderId = userOrderSnap.data()?.globalOrderId;
-      if (globalOrderId) {
-        // Instead, use adminProducts/*/productsOrder
-        // TODO: Implement logic to update in adminProducts/*/productsOrder
-      }
-      setOrders(prev => prev.map(o => o.id === order.id ? { ...o, orderReceived: true } : o));
-      setFilteredOrders(prev => prev.map(o => o.id === order.id ? { ...o, orderReceived: true } : o));
-    } catch (err) {
-      alert('Failed to update order status. Please try again.');
+      await markOrderReceived(order.id);
+      setOrders((prev) =>
+        prev.map((o) => (o.id === order.id ? { ...o, orderReceived: true } : o))
+      );
+      setFilteredOrders((prev) =>
+        prev.map((o) => (o.id === order.id ? { ...o, orderReceived: true } : o))
+      );
+    } catch {
+      alert("Failed to update order status. Please try again.");
     }
   };
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
@@ -419,7 +348,7 @@ export default function OrdersPage() {
                                     Qty: {item.quantity}
                                     {item.size ? ` - Size: ${typeof item.size === 'object' && item.size !== null && 'size' in item.size ? (item.size as any).size : item.size}` : ''}
                                     {(() => {
-                                      const colorVal = item.color || item.selectedColor;
+                                      const colorVal = item.color;
                                       if (!colorVal) return '';
                                       if (typeof colorVal === 'object' && colorVal !== null && 'color' in colorVal) {
                                         return ` - Color: ${(colorVal as any).color}`;

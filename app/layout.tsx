@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import type { Metadata } from "next"
 import { Inter } from "next/font/google"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
@@ -7,7 +8,12 @@ import { AuthProvider } from "@/context/AuthContext"
 import ConditionalHeader from "@/components/ConditionalHeader"
 import ClientLayout from "./ClientLayout"
 
+export const metadata: Metadata = {
+  title: "DPT ONE",
+}
+
 const inter = Inter({ subsets: ["latin"] })
+
 
 export default function RootLayout({
   children,

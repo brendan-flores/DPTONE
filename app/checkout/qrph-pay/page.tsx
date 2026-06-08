@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/context/AuthContext";
 import { useCart } from "@/context/CartContext";
 import { useToast } from "@/hooks/use-toast";
-import { db } from "@/lib/firebase";
 import { supabase } from "@/lib/supabase";
 import {
   PERSONAL_GCASH_QR_PATH,
@@ -17,29 +16,29 @@ import {
 } from "@/lib/payment/personal-qr";
 import type { PendingQrphOrder } from "@/lib/checkout/types";
 import {
-  collection,
-  addDoc,
-  serverTimestamp,
-  doc,
-  runTransaction,
-  getDoc,
-  setDoc,
-  updateDoc,
-} from "firebase/firestore";
-import { getMonthKey, getWeekKey } from "@/lib/utils";
+  completeCustomerOrder,
+  saveOrderReceipt,
+  type CheckoutAddress,
+  type CheckoutOrderItem,
+} from "@/lib/storefront/checkout";
 
-function deepCleanUndefined(obj: unknown): unknown {
-  if (Array.isArray(obj)) {
-    return obj.map(deepCleanUndefined);
-  }
-  if (obj && typeof obj === "object") {
-    return Object.fromEntries(
-      Object.entries(obj as Record<string, unknown>)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => [k, deepCleanUndefined(v)])
-    );
-  }
-  return obj;
+function str(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function toCheckoutAddress(details: Record<string, unknown>): CheckoutAddress {
+  return {
+    firstName: str(details.firstName),
+    lastName: str(details.lastName),
+    address1: str(details.address1),
+    address2: str(details.address2) || undefined,
+    postalCode: str(details.postalCode),
+    city: str(details.city),
+    region: str(details.region),
+    phone: str(details.phone),
+    country: str(details.country, "Philippines"),
+    email: str(details.email) || undefined,
+  };
 }
 
 function loadPendingOrder(): PendingQrphOrder | null {
@@ -153,168 +152,48 @@ export default function QrphPayPage() {
         shippingOptions.find((o) => o.value === order.shippingMethod)?.price ??
         0;
 
-      const orderData = {
-        userId: user.uid,
-        userEmail: user.email,
+      const mappedItems: CheckoutOrderItem[] = items.map((item) => ({
+        id: String(item.id),
+        name: item.name,
+        price:
+          typeof item.price === "string"
+            ? parseFloat(item.price.replace(/[^\d.]/g, ""))
+            : Number(item.price),
+        quantity: item.quantity,
+        image: item.image,
+        size: item.selectedSize,
+        color: item.selectedColor || item.color || "N/A",
+      }));
+
+      if (mappedItems.length === 0) throw new Error("No product in order");
+
+      const orderId = await completeCustomerOrder({
         orderNumber: order.reference,
-        dateOrdered: serverTimestamp(),
-        dateOrderedClient: Date.now(),
-        createdAt: serverTimestamp(),
         status: "pending",
         total: subtotal + shipping,
         subtotal,
         shipping,
         tax: 0,
-        items: items.map((item) => ({
-          id: item.id,
-          name: item.name,
-          price:
-            typeof item.price === "string"
-              ? parseFloat(item.price.replace(/[^\d.]/g, ""))
-              : item.price,
-          quantity: item.quantity,
-          image: item.image,
-          size: item.selectedSize,
-          color: item.selectedColor || item.color || "N/A",
-        })),
-        shippingAddress: order.deliveryDetails,
-        billingAddress: order.billingDetails,
         paymentMethod: "qrph",
-        paymentQrSource: "personal_gcash",
         paymentStatus: "awaiting_confirmation",
+        shippingAddress: toCheckoutAddress(order.deliveryDetails),
+        billingAddress: toCheckoutAddress(order.billingDetails),
+        items: mappedItems,
+        userEmail: user.email ?? undefined,
+        notes: JSON.stringify({
+          paymentQrSource: "personal_gcash",
+          paymentReference: refTrimmed || null,
+          paymentReceiptUrl: receiptUrl,
+          shippingMethod: order.shippingMethod,
+        }),
+      });
+
+      await saveOrderReceipt(user.uid, orderId, order.reference, {
+        paymentMethod: "qrph",
         paymentReference: refTrimmed || null,
-        gcashReference: refTrimmed || null,
         paymentReceiptUrl: receiptUrl,
         shippingMethod: order.shippingMethod,
-        notes: "",
-      };
-
-      const cleanOrderData = deepCleanUndefined(orderData) as typeof orderData;
-      cleanOrderData.dateOrdered = serverTimestamp();
-      cleanOrderData.createdAt = serverTimestamp();
-
-      const adminProductId = cleanOrderData.items[0]?.id;
-      if (!adminProductId) throw new Error("No product in order");
-
-      const productsOrderRef = collection(
-        db,
-        "adminProducts",
-        String(adminProductId),
-        "productsOrder"
-      );
-      const userOrdersRef = collection(db, "users", user.uid, "orders");
-
-      let adminOrderId = "";
-      await runTransaction(db, async (transaction) => {
-        const adminOrderRef = doc(productsOrderRef);
-        adminOrderId = adminOrderRef.id;
-        transaction.set(adminOrderRef, { ...cleanOrderData, userId: user.uid });
-        const userOrderRef = doc(userOrdersRef);
-        transaction.set(userOrderRef, {
-          ...cleanOrderData,
-          globalOrderId: adminOrderRef.id,
-          adminProductId: String(adminProductId),
-        });
-        transaction.update(adminOrderRef, { userOrderId: userOrderRef.id });
       });
-
-      for (const item of cleanOrderData.items) {
-        await addDoc(
-          collection(
-            db,
-            "adminProducts",
-            String(adminProductId),
-            "productsOrder",
-            adminOrderId,
-            "orderDetails"
-          ),
-          { ...item, dateOrdered: cleanOrderData.dateOrdered }
-        );
-      }
-
-      const totalQuantity = cleanOrderData.items.reduce(
-        (s, i) => s + (i.quantity || 0),
-        0
-      );
-      await addDoc(collection(db, "sales"), {
-        timestamp: serverTimestamp(),
-        total: cleanOrderData.total,
-        quantity: totalQuantity,
-        userId: user.uid,
-        orderId: adminOrderId,
-      });
-
-      try {
-        const now = new Date();
-        const monthKey = getMonthKey(now);
-        const weekKey = getWeekKey(now);
-        const dayOfWeek = now.toLocaleString("en-US", { weekday: "short" });
-        const dayOfMonth = String(now.getDate());
-
-        const weeklyRef = doc(db, "AdminAnalytics", "weekly_" + weekKey);
-        const weeklySnap = await getDoc(weeklyRef);
-        const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        let weeklyDays = Object.fromEntries(weekDays.map((d) => [d, 0]));
-        let weeklyTotal = cleanOrderData.total;
-        let weeklyQuantity = totalQuantity;
-        if (weeklySnap.exists()) {
-          const data = weeklySnap.data();
-          weeklyDays = { ...weeklyDays, ...(data.days || {}) };
-          weeklyDays[dayOfWeek] =
-            (weeklyDays[dayOfWeek] || 0) + cleanOrderData.total;
-          weeklyTotal = (data.total || 0) + cleanOrderData.total;
-          weeklyQuantity = (data.quantity || 0) + totalQuantity;
-        } else {
-          weeklyDays[dayOfWeek] = cleanOrderData.total;
-        }
-        await setDoc(weeklyRef, {
-          days: weeklyDays,
-          total: weeklyTotal,
-          quantity: weeklyQuantity,
-          updatedAt: serverTimestamp(),
-        });
-
-        const monthlyRef = doc(db, "AdminAnalytics", "monthly_" + monthKey);
-        const monthlySnap = await getDoc(monthlyRef);
-        let monthlyDays = Object.fromEntries(
-          Array.from({ length: 31 }, (_, i) => [String(i + 1), 0])
-        );
-        let monthlyTotal = cleanOrderData.total;
-        let monthlyQuantity = totalQuantity;
-        if (monthlySnap.exists()) {
-          const data = monthlySnap.data();
-          monthlyDays = { ...monthlyDays, ...(data.days || {}) };
-          monthlyDays[dayOfMonth] =
-            (monthlyDays[dayOfMonth] || 0) + cleanOrderData.total;
-          monthlyTotal = (data.total || 0) + cleanOrderData.total;
-          monthlyQuantity = (data.quantity || 0) + totalQuantity;
-        } else {
-          monthlyDays[dayOfMonth] = cleanOrderData.total;
-        }
-        await setDoc(monthlyRef, {
-          days: monthlyDays,
-          total: monthlyTotal,
-          quantity: monthlyQuantity,
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        console.error("Analytics update failed:", err);
-      }
-
-      try {
-        for (const item of cleanOrderData.items) {
-          const productRef = doc(db, "adminProducts", String(item.id));
-          const productSnap = await getDoc(productRef);
-          const currentCount = productSnap.exists()
-            ? productSnap.data().purchasedCount || 0
-            : 0;
-          await updateDoc(productRef, {
-            purchasedCount: currentCount + (item.quantity || 1),
-          });
-        }
-      } catch (err) {
-        console.error("purchasedCount update failed:", err);
-      }
 
       sessionStorage.removeItem(PENDING_QRPH_ORDER_KEY);
       sessionStorage.removeItem(PENDING_GCASH_ORDER_KEY);

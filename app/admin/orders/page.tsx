@@ -1,59 +1,31 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { collection, query, orderBy, getDocs, doc, updateDoc, getDoc, serverTimestamp, where } from "firebase/firestore";
-import { db } from "@/lib/firebase";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  useMemo,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Calendar, Download, Search, Filter, ChevronDown, ChevronUp } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Search, Filter } from "lucide-react";
+import {
+  fetchAdminOrders,
+  updateAdminOrderStatus,
+  type AdminAddress,
+  type AdminOrder,
+} from "@/lib/admin/orders";
+import { ADMIN_REALTIME_TABLES } from "@/lib/admin/realtime";
+import { useAdminRealtimeQuery } from "@/hooks/useAdminRealtimeQuery";
 
-
-interface Order {
-  id: string;
-  orderNumber: string;
-  dateOrdered: Date | null;
-  status: string;
-  total: number;
-  subtotal: number;
-  shipping: number;
-  tax: number;
-  items: OrderItem[];
-  shippingAddress: Address;
-  billingAddress: Address;
-  paymentMethod: string;
-  paymentStatus: string;
-  userEmail?: string;
-  userName: string;
-  userPhone: string;
-  trackingNumber: string;
-  estimatedDelivery: Date | null;
-  userId?: string;
-  deliveredAt?: number;
-  adminProductId: string;
-  statusHistory?: { status: string; timestamp: any }[];
-}
-
-interface OrderItem {
-  id: string;
-  name: string;
-  price: number;
-  quantity: number;
-  image: string;
-  size?: string;
-  color?: string;
-}
-
-interface Address {
-  firstName: string;
-  lastName: string;
-  address1: string;
-  address2?: string;
-  city: string;
-  region: string;
-  postalCode: string;
-  phone: string;
-}
+type Order = AdminOrder;
 
 const ORDER_STATUSES = [
   "pending",
@@ -65,121 +37,45 @@ const ORDER_STATUSES = [
   "returned/refunded",
 ];
 
+const EMPTY_ORDERS: Order[] = [];
+
 export default function AdminOrdersPage() {
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [loading, setLoading] = useState(true);
+  const orderTables = useMemo(() => [...ADMIN_REALTIME_TABLES.orders], []);
+  const {
+    data: ordersData,
+    loading,
+    setData: setOrdersData,
+  } = useAdminRealtimeQuery<Order[]>({
+    channel: "orders",
+    tables: orderTables,
+    fetcher: fetchAdminOrders,
+  });
+  const orders = ordersData ?? EMPTY_ORDERS;
+  const setOrders: Dispatch<SetStateAction<Order[]>> = (updater) => {
+    setOrdersData((prev) => {
+      const current = prev ?? [];
+      return typeof updater === "function" ? updater(current) : updater;
+    });
+  };
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("date-desc");
-  const [filteredOrders, setFilteredOrders] = useState<Order[]>([]);
   const [showMobileFilter, setShowMobileFilter] = useState(false);
+  const [updatingOrderId, setUpdatingOrderId] = useState<string | null>(null);
 
-  useEffect(() => {
-    const fetchOrders = async () => {
-      try {
-        // Fetch all adminProducts
-        const adminProductsSnapshot = await getDocs(collection(db, 'adminProducts'));
-        let allOrders: Order[] = [];
-        for (const productDoc of adminProductsSnapshot.docs) {
-          const productId = productDoc.id;
-          const ordersSnapshot = await getDocs(collection(db, 'adminProducts', productId, 'productsOrder'));
-          ordersSnapshot.forEach(orderDoc => {
-            const data = orderDoc.data();
-            // Debug: log all date fields for this order
-            console.log('OrderDoc', orderDoc.id, {
-              dateOrdered: data.dateOrdered,
-              dateOrderedClient: data.dateOrderedClient,
-              createdAt: data.createdAt,
-              orderNumber: data.orderNumber,
-              status: data.status,
-              userEmail: data.userEmail,
-              shippingAddress: data.shippingAddress,
-              billingAddress: data.billingAddress,
-              items: data.items,
-            });
-            let dateOrderedValue: Date | null = null;
-            if (data.dateOrdered && typeof data.dateOrdered.toDate === "function") {
-              dateOrderedValue = data.dateOrdered.toDate();
-            } else if (data.dateOrdered) {
-              const d = new Date(data.dateOrdered);
-              dateOrderedValue = isNaN(d.getTime()) ? null : d;
-            }
-            // Fallback: use dateOrderedClient if available
-            if (!dateOrderedValue && data.dateOrderedClient) {
-              const clientDate = new Date(data.dateOrderedClient);
-              if (!isNaN(clientDate.getTime())) dateOrderedValue = clientDate;
-            }
-            // Fallback: use createdAt if available
-            if (!dateOrderedValue && data.createdAt) {
-              if (typeof data.createdAt.toDate === 'function') {
-                dateOrderedValue = data.createdAt.toDate();
-              } else {
-                const createdAtDate = new Date(data.createdAt);
-                if (!isNaN(createdAtDate.getTime())) dateOrderedValue = createdAtDate;
-              }
-            }
-            let deliveredAtValue;
-            if (data.deliveredAt && typeof data.deliveredAt.toDate === "function") {
-              deliveredAtValue = data.deliveredAt.toDate();
-            } else if (data.deliveredAt) {
-              deliveredAtValue = new Date(data.deliveredAt);
-            }
-            allOrders.push({
-              id: orderDoc.id,
-              orderNumber: data.orderNumber,
-              dateOrdered: dateOrderedValue,
-              status: data.status,
-              total: data.total,
-              subtotal: data.subtotal,
-              shipping: data.shipping,
-              tax: data.tax,
-              items: data.items || [],
-              shippingAddress: data.shippingAddress,
-              billingAddress: data.billingAddress,
-              paymentMethod: data.paymentMethod,
-              paymentStatus: data.paymentStatus,
-              userEmail: data.userEmail,
-              userName: data.shippingAddress?.firstName + ' ' + data.shippingAddress?.lastName,
-              userPhone: data.shippingAddress?.phone,
-              trackingNumber: data.trackingNumber,
-              estimatedDelivery: data.estimatedDelivery && typeof data.estimatedDelivery.toDate === "function"
-                ? data.estimatedDelivery.toDate()
-                : (data.estimatedDelivery ? new Date(data.estimatedDelivery) : undefined),
-              userId: data.userId,
-              deliveredAt: deliveredAtValue,
-              adminProductId: productId,
-              statusHistory: data.statusHistory || [],
-            });
-          });
-        }
-        // Sort allOrders by dateOrdered descending
-        allOrders.sort((a, b) => {
-          const dateA = (a.dateOrdered && a.dateOrdered instanceof Date) ? Number(a.dateOrdered.getTime()) : 0;
-          const dateB = (b.dateOrdered && b.dateOrdered instanceof Date) ? Number(b.dateOrdered.getTime()) : 0;
-          return dateB - dateA;
-        });
-        setOrders(allOrders);
-      } catch (error) {
-        console.error("Error fetching orders:", error);
-        setOrders([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchOrders();
-  }, []);
-
-  useEffect(() => {
+  const filteredOrders = useMemo(() => {
     let filtered = [...orders];
     if (searchTerm) {
       const lower = searchTerm.toLowerCase();
-      filtered = filtered.filter(order => {
-        const fields = [order.orderNumber, order.userName, order.userEmail].map(f => (f || '').toLowerCase());
-        return fields.some(f => f.includes(lower));
+      filtered = filtered.filter((order) => {
+        const fields = [order.orderNumber, order.userName, order.userEmail].map(
+          (f) => (f || "").toLowerCase()
+        );
+        return fields.some((f) => f.includes(lower));
       });
     }
     if (statusFilter !== "all") {
-      filtered = filtered.filter(order => order.status === statusFilter);
+      filtered = filtered.filter((order) => order.status === statusFilter);
     }
     if (sortBy === "date-desc") {
       filtered.sort((a, b) => {
@@ -198,7 +94,7 @@ export default function AdminOrdersPage() {
     } else if (sortBy === "total-asc") {
       filtered.sort((a, b) => (a.total || 0) - (b.total || 0));
     }
-    setFilteredOrders(filtered);
+    return filtered;
   }, [orders, searchTerm, statusFilter, sortBy]);
 
   const formatDate = (date: Date | string | undefined | null, withTime = false) => {
@@ -235,7 +131,7 @@ export default function AdminOrdersPage() {
     }).format(d);
   };
 
-  const formatAddress = (addr?: Address) => {
+  const formatAddress = (addr?: AdminAddress) => {
     if (!addr) return "N/A";
     return `${addr.firstName} ${addr.lastName}, ${addr.address1}${addr.address2 ? ', ' + addr.address2 : ''}, ${addr.city}, ${addr.region} ${addr.postalCode}, ${addr.phone}`;
   };
@@ -269,109 +165,84 @@ export default function AdminOrdersPage() {
     }
   };
 
-  // Helper to update order status in Firestore (both global and user order)
   async function updateOrderStatus({
     orderId,
     newStatus,
-    userId,
-    setOrders,
-    deliveredAtUpdate = {},
-    optimisticDeliveredAt
+    optimisticDeliveredAt,
   }: {
-    orderId: string,
-    newStatus: string,
-    userId: string,
-    setOrders: React.Dispatch<React.SetStateAction<Order[]>>,
-    deliveredAtUpdate?: any,
-    optimisticDeliveredAt?: Date | null
+    orderId: string;
+    newStatus: string;
+    optimisticDeliveredAt?: Date | null;
   }) {
-    try {
-      // Find the specific adminProductId for the order from the current state
-      const orderToUpdate = orders.find(o => o.id === orderId);
-      if (!orderToUpdate) {
-        console.error("Order not found for orderId:", orderId);
-        alert("Failed to update order status: Order not found.");
-        return;
-      }
-      const adminProductId = orderToUpdate.adminProductId;
+    const previous = orders.find((o) => o.id === orderId);
+    if (!previous) {
+      alert("Failed to update order status: Order not found.");
+      return;
+    }
 
-      // Optimistically update the UI
-      const newHistoryEntry = { status: newStatus, timestamp: new Date() };
-      setOrders(prev => prev.map(o =>
+    const newHistoryEntry = {
+      status: newStatus,
+      timestamp: new Date().toISOString(),
+    };
+
+    setUpdatingOrderId(orderId);
+    setOrders((prev) =>
+      prev.map((o) =>
         o.id === orderId
-          ? { ...o, status: newStatus, ...deliveredAtUpdate, deliveredAt: optimisticDeliveredAt !== undefined ? optimisticDeliveredAt : o.deliveredAt, statusHistory: [...(o.statusHistory || []), newHistoryEntry] }
+          ? {
+              ...o,
+              status: newStatus,
+              deliveredAt:
+                optimisticDeliveredAt !== undefined
+                  ? optimisticDeliveredAt
+                  : o.deliveredAt,
+              statusHistory: [...(o.statusHistory || []), newHistoryEntry],
+            }
           : o
-      ));
+      )
+    );
 
-      const orderRef = doc(db, 'adminProducts', adminProductId, 'productsOrder', orderId);
-      await updateDoc(orderRef, {
-        status: newStatus,
-        ...deliveredAtUpdate,
-        statusHistory: [...(orderToUpdate.statusHistory || []), newHistoryEntry],
-      });
-
-      // Update the user's order as well
-      // First, find the user's order document using the globalOrderId (which is orderId here)
-      console.log('Updating user order:', { userId, orderId });
-      const userOrdersCollectionRef = collection(db, 'users', userId, 'orders');
-      const q = query(userOrdersCollectionRef, where('globalOrderId', '==', orderId));
-      const userOrderSnapshot = await getDocs(q);
-      console.log('User order found:', !userOrderSnapshot.empty);
-
-      if (!userOrderSnapshot.empty) {
-        const userOrderIdToUpdate = userOrderSnapshot.docs[0].id;
-        const userOrderRef = doc(db, 'users', userId, 'orders', userOrderIdToUpdate);
-        await updateDoc(userOrderRef, {
-          status: newStatus,
-          ...deliveredAtUpdate,
-          statusHistory: [...((userOrderSnapshot.docs[0].data().statusHistory) || []), newHistoryEntry],
-        });
-        console.log('User order updated!');
-      } else {
-        console.warn('User order NOT found for globalOrderId:', orderId, 'userId:', userId);
-      }
-
-      console.log("Order status updated successfully in Firestore!");
+    try {
+      await updateAdminOrderStatus(
+        orderId,
+        newStatus,
+        newStatus === "delivered"
+          ? (optimisticDeliveredAt ?? new Date()).toISOString()
+          : newStatus !== "delivered" && previous.status === "delivered"
+            ? null
+            : undefined
+      );
     } catch (err) {
-      alert("Failed to update order status: " + (err instanceof Error ? err.message : String(err)));
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? previous : o))
+      );
+      alert(
+        "Failed to update order status: " +
+          (err instanceof Error ? err.message : String(err))
+      );
+    } finally {
+      setUpdatingOrderId(null);
     }
   }
 
   // Helper to get a valid date from order (robust for Firestore Timestamp, string, number, or serverTimestamp placeholder)
-  const getOrderDate = (order: any) => {
-    // Debug log
-    console.log('getOrderDate called for order:', order.orderNumber, 'dateOrdered:', order.dateOrdered);
-    if (order.dateOrdered && order.dateOrdered instanceof Date && !isNaN(order.dateOrdered.getTime())) {
+  const getOrderDate = (order: Order) => {
+    if (
+      order.dateOrdered &&
+      order.dateOrdered instanceof Date &&
+      !isNaN(order.dateOrdered.getTime())
+    ) {
       return order.dateOrdered;
     }
-    // Fallback: use earliest statusHistory timestamp if available
-    if (order.statusHistory && Array.isArray(order.statusHistory) && order.statusHistory.length > 0) {
+    if (order.statusHistory?.length) {
       const timestamps = order.statusHistory
-        .map((h: any) => {
-          if (h.timestamp && typeof h.timestamp.toDate === 'function') return h.timestamp.toDate();
-          if (typeof h.timestamp === 'string' || typeof h.timestamp === 'number') {
-            const t = new Date(h.timestamp);
-            if (!isNaN(t.getTime())) return t;
-          }
-          return null;
+        .map((h) => {
+          const t = new Date(h.timestamp);
+          return isNaN(t.getTime()) ? null : t;
         })
-        .filter((t: Date | null) => t !== null) as Date[];
+        .filter((t): t is Date => t !== null);
       if (timestamps.length > 0) {
-        return new Date(Math.min(...timestamps.map(t => t.getTime())));
-      }
-    }
-    // Fallback: use dateOrderedClient if available
-    if (order.dateOrderedClient) {
-      const clientDate = new Date(order.dateOrderedClient);
-      if (!isNaN(clientDate.getTime())) return clientDate;
-    }
-    // Fallback: use createdAt if available
-    if (order.createdAt) {
-      if (typeof order.createdAt.toDate === 'function') {
-        return order.createdAt.toDate();
-      } else {
-        const createdAtDate = new Date(order.createdAt);
-        if (!isNaN(createdAtDate.getTime())) return createdAtDate;
+        return new Date(Math.min(...timestamps.map((t) => t.getTime())));
       }
     }
     return undefined;
@@ -379,7 +250,7 @@ export default function AdminOrdersPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
+      <div className="flex items-center justify-center py-12">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#3390ff] mx-auto"></div>
           <p className="mt-4 text-[#8ec0ff]">Loading orders...</p>
@@ -389,8 +260,7 @@ export default function AdminOrdersPage() {
   }
 
   return (
-    <div className="w-full h-screen flex bg-black">
-      <div className="w-full h-full bg-[#161e2e] px-8 py-10 flex flex-col">
+    <div className="w-full pb-8">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-8">
           {/* Mobile Filter Button */}
           <div className="flex gap-2 items-center w-full">
@@ -492,10 +362,7 @@ export default function AdminOrdersPage() {
           </div>
         ) : (
           <div className="space-y-6 overflow-x-auto w-full">
-            {filteredOrders.map((order) => {
-              // Debug log for dateOrdered
-              console.log('orderNumber:', order.orderNumber, 'dateOrdered:', order.dateOrdered, 'getOrderDate:', getOrderDate(order));
-              return (
+            {filteredOrders.map((order) => (
                 <Card key={order.id} className="overflow-hidden bg-[#161e2e] text-white border border-[#22304a] w-full max-w-full box-border">
                   <CardHeader className="bg-[#22304a]">
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -509,36 +376,44 @@ export default function AdminOrdersPage() {
                           order.status === 'cancelled' ? 'bg-red-400 text-white' :
                           'bg-[#8ec0ff] text-black') + ' flex justify-center items-center'
                         }>
-                          <select
-                            value={order.status}
-                            onChange={async (e) => {
-                              const newStatus = e.target.value;
-                              let deliveredAtUpdate = {};
-                              let optimisticDeliveredAt = undefined;
-                              if (newStatus === 'delivered') {
-                                deliveredAtUpdate = { deliveredAt: new Date() };
-                                optimisticDeliveredAt = new Date();
-                              } else if (order.status === 'delivered' && newStatus !== 'delivered') {
-                                deliveredAtUpdate = { deliveredAt: null };
-                                optimisticDeliveredAt = null;
-                              }
-                              await updateOrderStatus({
-                                orderId: order.id,
-                                newStatus,
-                                userId: order.userId || "",
-                                setOrders,
-                                deliveredAtUpdate,
-                                optimisticDeliveredAt
-                              });
-                            }}
-                            className="bg-transparent border-none text-inherit font-semibold focus:outline-none focus:ring-2 focus:ring-[#3390ff] rounded text-center"
-                          >
-                            {ORDER_STATUSES.map(status => (
-                              <option key={status} value={status} className="text-black">
-                                {status === 'returned/refunded' ? 'Returned/Refunded' : status.charAt(0).toUpperCase() + status.slice(1)}
-                              </option>
-                            ))}
-                          </select>
+                          {order.status === "cancelled" ? (
+                            <span className="font-semibold px-2 py-1">Cancelled</span>
+                          ) : (
+                            <Select
+                              value={order.status}
+                              disabled={updatingOrderId === order.id}
+                              onValueChange={async (newStatus) => {
+                                if (newStatus === order.status) return;
+                                let optimisticDeliveredAt: Date | null | undefined;
+                                if (newStatus === "delivered") {
+                                  optimisticDeliveredAt = new Date();
+                                } else if (
+                                  order.status === "delivered" &&
+                                  newStatus !== "delivered"
+                                ) {
+                                  optimisticDeliveredAt = null;
+                                }
+                                await updateOrderStatus({
+                                  orderId: order.id,
+                                  newStatus,
+                                  optimisticDeliveredAt,
+                                });
+                              }}
+                            >
+                              <SelectTrigger className="h-8 min-w-[9rem] border-none bg-transparent shadow-none text-inherit font-semibold focus:ring-2 focus:ring-[#3390ff]">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {ORDER_STATUSES.map((status) => (
+                                  <SelectItem key={status} value={status}>
+                                    {status === "returned/refunded"
+                                      ? "Returned/Refunded"
+                                      : status.charAt(0).toUpperCase() + status.slice(1)}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          )}
                         </Badge>
                         <div>
                           <p className="font-medium text-white">{order.orderNumber}</p>
@@ -568,11 +443,17 @@ export default function AdminOrdersPage() {
                           {order.items.map((item, idx) => (
                             <div key={`${item.id}-${idx}`} className="flex items-center gap-3">
                               <div className="relative w-16 h-16 rounded-lg overflow-hidden bg-[#22304a]">
-                                <img
-                                  src={item.image}
-                                  alt={item.name}
-                                  className="object-cover w-full h-full"
-                                />
+                                {item.image ? (
+                                  <img
+                                    src={item.image}
+                                    alt={item.name}
+                                    className="object-cover w-full h-full"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-[#8ec0ff] text-xs">
+                                    No image
+                                  </div>
+                                )}
                               </div>
                               <div className="flex-1 min-w-0">
                                 <p className="font-medium text-white truncate">{item.name}</p>
@@ -651,7 +532,7 @@ export default function AdminOrdersPage() {
                             <div className="w-3 h-3 rounded-full bg-blue-400 mt-1" />
                             <div>
                               <div className="font-medium">{entry.status.charAt(0).toUpperCase() + entry.status.slice(1)}</div>
-                              <div className="text-xs text-[#93c5fd]">{formatDateLong(entry.timestamp?.toDate ? entry.timestamp.toDate() : entry.timestamp)}</div>
+                              <div className="text-xs text-[#93c5fd]">{formatDateLong(entry.timestamp)}</div>
                             </div>
                           </div>
                         ))
@@ -661,11 +542,9 @@ export default function AdminOrdersPage() {
                     </div>
                   </CardContent>
                 </Card>
-              );
-            })}
+            ))}
           </div>
         )}
-      </div>
     </div>
   );
 } 

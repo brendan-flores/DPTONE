@@ -1,10 +1,21 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
-import { db } from "@/lib/firebase";
-import { collection, addDoc } from "firebase/firestore";
-import { useAuth } from "@/context/AuthContext";
+import { createAdminProduct } from "@/lib/admin/products";
+import {
+  listBrandProductImages,
+  uploadCroppedProductImage,
+} from "@/lib/admin/product-images";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { CheckCircle2 } from "lucide-react";
 import ReactCrop, { Crop } from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import Modal from 'react-modal';
@@ -25,7 +36,6 @@ export default function AddProductPage() {
   const [color, setColor] = useState("");
   const brandOptions = ["Strap", "Richboyz", "Charlotte Folk", "MN+LA"];
   const router = useRouter();
-  const { user } = useAuth();
   const [cropModalOpen, setCropModalOpen] = useState(false);
   const [cropImage, setCropImage] = useState<string | null>(null);
   const [cropConfig, setCropConfig] = useState<Crop>({ unit: '%', x: 0, y: 0, width: 100, height: 100 });
@@ -33,80 +43,75 @@ export default function AddProductPage() {
   const [cropImageRef, setCropImageRef] = useState<HTMLImageElement | null>(null);
   const [croppingIdx, setCroppingIdx] = useState<number | null>(null);
   const [croppedImageUrl, setCroppedImageUrl] = useState<string | null>(null);
-
-  const brandFolderMap: Record<string, string> = {
-    "Charlotte Folk": "CHARLOTTE FOLK PRODUCTS",
-    "MN+LA": "MNLA PRODUCTS",
-    "Richboyz": "RICHBOYZ PRODUCTS",
-    "Strap": "STRAP PRODUCTS"
-  };
+  const [successModalOpen, setSuccessModalOpen] = useState(false);
+  const [addedProductName, setAddedProductName] = useState("");
+  const [imageListError, setImageListError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     const fetchImages = async () => {
       setLoadingImages(true);
+      setImageListError(null);
       if (!brand) {
         setImages([]);
         setLoadingImages(false);
         return;
       }
-      // List images only from the mapped brand's folder
-      const folder = brandFolderMap[brand] || brand;
-      const { data, error } = await supabase.storage.from('product-images').list(`${folder}/`, { limit: 100 });
-      console.log('Supabase list data:', data);
-      console.log('Supabase list error:', error);
-      if (error) {
-        setImages([]);
-        setLoadingImages(false);
-        setImages([]);
-        setLoadingImages(false);
-        (window as any).supabaseListError = error; // for easy inspection
-        return;
+      try {
+        const urls = await listBrandProductImages(brand);
+        if (!cancelled) setImages(urls);
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) {
+          setImages([]);
+          setImageListError("Could not load images for this brand.");
+        }
+      } finally {
+        if (!cancelled) setLoadingImages(false);
       }
-      const urls = data?.filter(file => file.name.match(/\.(jpg|jpeg|png|gif)$/i)).map(file =>
-        `${supabase.storage.from('product-images').getPublicUrl(`${folder}/${file.name}`).data.publicUrl}`
-      ) || [];
-      setImages(urls);
-      setLoadingImages(false);
-      // Show the data structure in the UI for debugging
-      (window as any).supabaseListData = data;
     };
-    fetchImages();
+    void fetchImages();
+    return () => {
+      cancelled = true;
+    };
   }, [brand]);
+
+  const addSelectedImage = (url: string) => {
+    setSelectedImages((prev) => (prev.includes(url) ? prev : [...prev, url]));
+  };
+
+  const resetForm = () => {
+    setName("");
+    setDescription("");
+    setPrice("");
+    setStock("");
+    setColor("");
+    setSelectedImages([]);
+    setBrand("");
+    setIsFeatured(false);
+    setSizes([{ size: "", stock: "" }]);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
     try {
-      const filteredSizes = sizes.filter(s => s.size && s.stock !== '').map(s => ({ size: s.size, stock: Number(s.stock) }));
-      const totalStock = filteredSizes.reduce((sum, s) => sum + Number(s.stock), 0);
-      const productData: any = {
+      const filteredSizes = sizes
+        .filter((s) => s.size && s.stock !== "")
+        .map((s) => ({ size: s.size, stock: Number(s.stock) }));
+      await createAdminProduct({
         name,
         description,
         price: Number(price),
         color,
         imageUrls: selectedImages.filter(Boolean),
-        brand: brand || null,
+        brand: brand || undefined,
         isFeaturedProduct: isFeatured,
-        createdAt: new Date(),
         sizes: filteredSizes,
-        totalStock,
-      };
-      Object.keys(productData).forEach(
-        (key) => productData[key] === undefined && delete productData[key]
-      );
-      await addDoc(collection(db, "adminProducts"), productData);
-      alert("Product added successfully!");
-      // Clear all form fields
-      setName("");
-      setDescription("");
-      setPrice("");
-      setStock("");
-      setColor("");
-      setSelectedImages([]);
-      setBrand("");
-      setIsFeatured(false);
-      setSizes([{ size: '', stock: '' }]);
-      router.push("/admin");
+      });
+      setAddedProductName(name);
+      resetForm();
+      setSuccessModalOpen(true);
     } catch (error) {
       alert("Failed to add product. Please try again.");
       console.error(error);
@@ -118,13 +123,25 @@ export default function AddProductPage() {
   // Helper to get cropped image as blob using react-image-crop
   async function getCroppedImg(image: HTMLImageElement, crop: Crop) {
     if (!crop.width || !crop.height) return null;
-    // Calculate crop area in natural image pixels
-    const scaleX = image.naturalWidth / image.width;
-    const scaleY = image.naturalHeight / image.height;
-    const cropX = Math.round(crop.x * scaleX);
-    const cropY = Math.round(crop.y * scaleY);
-    const cropWidth = Math.round(crop.width * scaleX);
-    const cropHeight = Math.round(crop.height * scaleY);
+
+    let cropX: number;
+    let cropY: number;
+    let cropWidth: number;
+    let cropHeight: number;
+
+    if (crop.unit === "%") {
+      cropX = Math.round((crop.x / 100) * image.naturalWidth);
+      cropY = Math.round((crop.y / 100) * image.naturalHeight);
+      cropWidth = Math.round((crop.width / 100) * image.naturalWidth);
+      cropHeight = Math.round((crop.height / 100) * image.naturalHeight);
+    } else {
+      const scaleX = image.naturalWidth / image.width;
+      const scaleY = image.naturalHeight / image.height;
+      cropX = Math.round(crop.x * scaleX);
+      cropY = Math.round(crop.y * scaleY);
+      cropWidth = Math.round(crop.width * scaleX);
+      cropHeight = Math.round(crop.height * scaleY);
+    }
     const canvas = document.createElement('canvas');
     canvas.width = cropWidth;
     canvas.height = cropHeight;
@@ -163,43 +180,51 @@ export default function AddProductPage() {
   };
 
   const handleCropComplete = async () => {
-    if (cropImageRef && completedCrop && croppingIdx !== null && brand) {
-      // Check if crop region is the full image (no cropping needed)
-      const isFullImage =
-        completedCrop.x === 0 &&
-        completedCrop.y === 0 &&
-        Math.round(completedCrop.width) === 100 &&
-        Math.round(completedCrop.height) === 100 &&
-        completedCrop.unit === '%';
-      if (isFullImage) {
-        // Just use the original image as selected
-        setSelectedImages((prev) => [...prev, cropImage!]);
-        setCroppedImageUrl(cropImage!);
-      } else {
-        const croppedUrl = await getCroppedImg(cropImageRef, completedCrop);
-        if (croppedUrl) {
-          // Convert the croppedUrl (object URL) to a Blob
-          const response = await fetch(croppedUrl);
-          const blob = await response.blob();
-          // Generate a unique filename
-          const fileName = typeof crypto !== 'undefined' && crypto.randomUUID
-            ? `cropped_${crypto.randomUUID()}.jpg`
-            : `cropped_${Date.now()}_${Math.floor(Math.random()*10000)}.jpg`;
-          // Use the new folder structure
-          const folder = `DEPLOYED IMAGES/${brandFolderMap[brand] || brand}`;
-          const filePath = `${folder}/${fileName}`;
-          // Upload to Supabase Storage
-          const { data, error } = await supabase.storage.from('product-images').upload(filePath, blob, { contentType: 'image/jpeg' });
-          if (!error) {
-            const publicUrl = supabase.storage.from('product-images').getPublicUrl(filePath).data.publicUrl;
-            setSelectedImages((prev) => [...prev, publicUrl]);
-            setCroppedImageUrl(publicUrl);
-          } else {
-            alert('Image upload failed. ' + (error.message || JSON.stringify(error) || 'Please try again.'));
-          }
-        }
-      }
+    if (!cropImage || croppingIdx === null || !brand || !completedCrop) {
+      setCropModalOpen(false);
+      return;
     }
+
+    const isFullImage =
+      completedCrop.unit === "%" &&
+      completedCrop.x === 0 &&
+      completedCrop.y === 0 &&
+      Math.round(completedCrop.width) >= 99 &&
+      Math.round(completedCrop.height) >= 99;
+
+    try {
+      if (isFullImage) {
+        addSelectedImage(cropImage);
+        setCroppedImageUrl(cropImage);
+      } else {
+        if (!cropImageRef) {
+          alert("Image is still loading. Please wait a moment and try again.");
+          return;
+        }
+        const croppedUrl = await getCroppedImg(cropImageRef, completedCrop);
+        if (!croppedUrl) {
+          alert("Could not crop image. Please try again.");
+          return;
+        }
+        const response = await fetch(croppedUrl);
+        const blob = await response.blob();
+        const fileName =
+          typeof crypto !== "undefined" && crypto.randomUUID
+            ? `cropped_${crypto.randomUUID()}.jpg`
+            : `cropped_${Date.now()}_${Math.floor(Math.random() * 10000)}.jpg`;
+        const publicUrl = await uploadCroppedProductImage(brand, blob, fileName);
+        addSelectedImage(publicUrl);
+        setCroppedImageUrl(publicUrl);
+      }
+    } catch (err) {
+      console.error(err);
+      alert(
+        "Image upload failed. " +
+          (err instanceof Error ? err.message : "Please try again.")
+      );
+      return;
+    }
+
     setCropModalOpen(false);
     setCropImage(null);
     setCroppingIdx(null);
@@ -207,8 +232,7 @@ export default function AddProductPage() {
   };
 
   return (
-    <div className="h-screen bg-darkBlue overflow-y-auto">
-      <div className="w-full bg-[#161e2e] px-8 py-10 flex flex-col">
+    <div className="w-full max-w-3xl mx-auto pb-8">
         <h2 className="text-2xl font-bold mb-6 text-center text-[#3390ff]">Add New Product</h2>
         <form onSubmit={handleSubmit} className="w-full space-y-4">
           <div>
@@ -304,32 +328,59 @@ export default function AddProductPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-[#8ec0ff] mb-1">Select Product Images</label>
-            <p className="text-xs text-[#8ec0ff] mb-2">Please select a brand to view images.</p>
+            <p className="text-xs text-[#8ec0ff] mb-2">
+              {brand
+                ? "Click an image to select it, or use Crop to adjust before selecting."
+                : "Select a brand first to load images."}
+            </p>
             {loadingImages ? (
-              <div className="text-gray-500 text-sm">Loading images...</div>
+              <div className="text-[#8ec0ff] text-sm">Loading images...</div>
+            ) : imageListError ? (
+              <div className="text-red-400 text-sm">{imageListError}</div>
+            ) : !brand ? (
+              <div className="text-[#8ec0ff] text-sm">Select a brand to view images.</div>
             ) : images.length === 0 ? (
-              <div className="text-gray-500 text-sm">Please select a brand to view images.</div>
+              <div className="text-[#8ec0ff] text-sm">
+                No images found for this brand in storage.
+              </div>
             ) : (
-              <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+              <div className="flex flex-wrap gap-3 max-h-48 overflow-y-auto">
                 {images.map((img, idx) => (
-                  <img
-                    key={img}
-                    src={img}
-                    alt={`Product ${idx + 1}`}
-                    className={`w-20 h-20 object-contain rounded-md border-2 cursor-pointer ${selectedImages.includes(img) ? 'border-blue-500' : 'border-gray-200'}`}
-                    onClick={() => handleImageClick(img, idx)}
-                  />
+                  <div key={img} className="flex flex-col items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => addSelectedImage(img)}
+                      className={`p-0.5 rounded-md border-2 transition-colors ${
+                        selectedImages.includes(img)
+                          ? "border-[#3390ff] ring-2 ring-[#3390ff]/40"
+                          : "border-[#22304a] hover:border-[#3390ff]"
+                      }`}
+                    >
+                      <img
+                        src={img}
+                        alt={`Product ${idx + 1}`}
+                        className="w-20 h-20 object-contain rounded bg-white"
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleImageClick(img, idx)}
+                      className="text-xs text-[#8ec0ff] hover:text-[#3390ff] underline"
+                    >
+                      Crop
+                    </button>
+                  </div>
                 ))}
               </div>
             )}
           </div>
           {selectedImages.length > 0 && (
-            <div className="mt-4 border border-blue-200 rounded-md p-2 bg-blue-50">
-              <div className="text-xs font-semibold text-blue-700 mb-2">Image Selected</div>
+            <div className="mt-4 border border-[#3390ff]/40 rounded-md p-3 bg-[#22304a]">
+              <div className="text-xs font-semibold text-[#3390ff] mb-2">Images Selected ({selectedImages.length})</div>
               <div className="flex gap-2 overflow-x-auto">
                 {selectedImages.map((img, i) => (
                   <div key={i} className="relative inline-block">
-                    <img src={img} alt="Selected" className="w-16 h-16 object-contain rounded border border-blue-400" />
+                    <img src={img} alt="Selected" className="w-16 h-16 object-contain rounded border border-[#3390ff] bg-white" />
                     <button
                       type="button"
                       onClick={() => setSelectedImages(selectedImages.filter((_, idx) => idx !== i))}
@@ -370,7 +421,6 @@ export default function AddProductPage() {
             </button>
           </div>
         </form>
-      </div>
       {/* Cropper Modal */}
       <Modal
         isOpen={cropModalOpen}
@@ -391,8 +441,7 @@ export default function AddProductPage() {
                 <img
                   src={cropImage}
                   alt="Crop"
-                  ref={el => setCropImageRef(el)}
-                  crossOrigin="anonymous"
+                  ref={(el) => setCropImageRef(el)}
                   style={{ maxWidth: '100%', maxHeight: 350, display: 'block', margin: '0 auto' }}
                 />
               </ReactCrop>
@@ -410,6 +459,42 @@ export default function AddProductPage() {
           <button onClick={handleCropComplete} className="px-4 py-2 bg-blue-600 text-white rounded">Crop & Select</button>
         </div>
       </Modal>
+
+      <Dialog open={successModalOpen} onOpenChange={setSuccessModalOpen}>
+        <DialogContent className="bg-[#161e2e] border border-[#22304a] text-white sm:max-w-md">
+          <DialogHeader className="items-center text-center sm:items-center sm:text-center">
+            <div className="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-full bg-[#22304a]">
+              <CheckCircle2 className="h-8 w-8 text-[#3390ff]" />
+            </div>
+            <DialogTitle className="text-xl text-[#3390ff]">
+              Product Added Successfully
+            </DialogTitle>
+            <DialogDescription className="text-[#8ec0ff]">
+              {addedProductName
+                ? `"${addedProductName}" has been added to your catalog.`
+                : "Your product has been added to the catalog."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="flex-col gap-2 sm:flex-col sm:space-x-0">
+            <Button
+              className="w-full bg-[#3390ff] hover:bg-[#2360b7] text-white"
+              onClick={() => {
+                setSuccessModalOpen(false);
+                router.push("/admin/products");
+              }}
+            >
+              View Products
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full border-[#22304a] bg-[#22304a] text-[#8ec0ff] hover:bg-[#2a3a5a] hover:text-white"
+              onClick={() => setSuccessModalOpen(false)}
+            >
+              Add Another Product
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 } 

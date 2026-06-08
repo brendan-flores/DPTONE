@@ -1,9 +1,8 @@
 "use client";
 import { useAuth } from "@/context/AuthContext";
-import { signOut } from "firebase/auth";
 import Link from "next/link";
 import { useState } from "react";
-import { auth } from "@/lib/firebase";
+import { supabase } from "@/lib/supabase";
 
 export default function UserProfile() {
   const { user } = useAuth();
@@ -11,7 +10,7 @@ export default function UserProfile() {
 
   const handleSignOut = async () => {
     try {
-      await signOut(auth);
+      await supabase.auth.signOut();
       window.location.href = "/";
     } catch (error) {
       console.error("Error signing out:", error);

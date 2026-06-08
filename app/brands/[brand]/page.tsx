@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { db } from '@/lib/firebase';
-import { collection, getDocs, query, where, getCountFromServer } from 'firebase/firestore';
+import { fetchStorefrontProducts } from '@/lib/storefront/products';
 import Image from "next/image";
 import Link from "next/link";
 
@@ -44,12 +43,11 @@ export default function BrandPage() {
   useEffect(() => {
     const fetchProducts = async () => {
       setLoading(true);
-      const q = query(collection(db, 'adminProducts'), where('brand', '==', brand));
-      const querySnapshot = await getDocs(q);
-      const items: any[] = [];
-      querySnapshot.forEach((docSnap) => {
-        items.push({ id: docSnap.id, ...docSnap.data() });
-      });
+      try {
+      const all = await fetchStorefrontProducts();
+      const items = all.filter(
+        (p) => p.brand?.toLowerCase() === brand.toLowerCase()
+      );
       setProducts(items);
       // Count in-stock and out-of-stock products client-side, considering sizes
       setInStockCount(
@@ -66,7 +64,11 @@ export default function BrandPage() {
             : !p.stock || Number(p.stock) === 0
         ).length
       );
-      setLoading(false);
+      } catch {
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
     };
     if (brand) {
       fetchProducts();
