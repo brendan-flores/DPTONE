@@ -11,7 +11,7 @@ DPT ONE is a Cebu-based streetwear brand offering curated collections and exclus
 - Checkout via cash on delivery (COD) or personal QR Ph payment
 - Order tracking, receipts, ratings, and returns
 
-**Admin** (`/admin`)
+**Admin** (admin subdomain only)
 
 - Separate admin authentication
 - Product catalog management
@@ -27,7 +27,7 @@ DPT ONE is a Cebu-based streetwear brand offering curated collections and exclus
 - **Next.js 16** (App Router) with **React 18** and **TypeScript**
 - **Tailwind CSS** and **shadcn/ui** (Radix UI)
 - **Chart.js** / **Recharts** for admin analytics
-- Deployed on **Vercel** (`dptone.vercel.app` storefront, `dptone-admin.vercel.app` admin)
+- Deployed on **Vercel** (storefront + admin subdomain on one project)
 
 ### Backend
 
@@ -71,6 +71,7 @@ cp .env.example .env.local
 | --- | --- | --- |
 | `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase anon (public) key |
+| `NEXT_PUBLIC_ADMIN_HOST` | Prod | Admin subdomain hostname (Vercel env only — not committed) |
 | `SUPABASE_SERVICE_ROLE_KEY` | No | Server-only; local admin scripts only — never expose to the client |
 
 ### 3. Database and storage
@@ -87,8 +88,8 @@ cp .env.example .env.local
 In **Supabase → Authentication → URL Configuration**, add your app URLs:
 
 - `http://localhost:3000/**` (local dev)
-- `https://dptone.vercel.app/**`
-- `https://dptone-admin.vercel.app/**`
+- Your storefront domain `/**`
+- Your admin subdomain `/**`
 
 ### 5. Run locally
 
@@ -96,9 +97,9 @@ In **Supabase → Authentication → URL Configuration**, add your app URLs:
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) for the storefront and [http://localhost:3000/admin](http://localhost:3000/admin) for the admin panel.
+Open [http://localhost:3000](http://localhost:3000) for the storefront and [http://localhost:3000/admin](http://localhost:3000/admin) for the admin panel (localhost is allowed in development only).
 
-On production, `dptone-admin.vercel.app` automatically redirects to `/admin` via middleware (both domains point to the same Vercel project).
+On production, `/admin` on the storefront domain is blocked. The admin subdomain redirects to `/admin` via middleware. Set `NEXT_PUBLIC_ADMIN_HOST` in Vercel — do not commit it to the repo.
 
 ### 6. Production build
 
@@ -107,4 +108,4 @@ npm run build
 npm start
 ```
 
-Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` in your Vercel project environment variables, then deploy.
+Set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `NEXT_PUBLIC_ADMIN_HOST` in your Vercel project environment variables, then deploy.

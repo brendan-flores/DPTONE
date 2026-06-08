@@ -9,6 +9,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import Image from 'next/image';
 import { useAuth } from '@/context/AuthContext';
 import { LOGO_URL } from "@/lib/assets";
+import { getAdminDashboardUrl } from "@/lib/admin-host";
 import { useStorefrontProducts } from "@/hooks/useStorefrontProducts";
 import { supabase } from "@/lib/supabase";
 
@@ -204,10 +205,13 @@ export default function Header() {
                 {user && !isAdminPage && !isAdmin && (
                   <Link href="/orders" className="hover:text-[#fff9f3]">Orders</Link>
                 )}
-                {!isAdminPage && (
-                  isAdmin && (
-                    <Link href="/admin" className="hover:text-[#fff9f3] text-[#60A5FA] font-semibold">Admin Dashboard</Link>
-                  )
+                {!isAdminPage && isAdmin && (
+                  <a
+                    href={getAdminDashboardUrl()}
+                    className="hover:text-[#fff9f3] text-[#60A5FA] font-semibold"
+                  >
+                    Admin Dashboard
+                  </a>
                 )}
               </nav>
             </div>
@@ -379,7 +383,13 @@ export default function Header() {
                       {/* Admin Dashboard link for admin */}
                       {isAdmin && !isAdminPage && (
                         <div className="mb-4">
-                          <Link href="/admin" className="text-[#60A5FA] font-semibold block py-2" onClick={() => setMobileMenuOpen(false)}>Admin Dashboard</Link>
+                          <a
+                            href={getAdminDashboardUrl()}
+                            className="text-[#60A5FA] font-semibold block py-2"
+                            onClick={() => setMobileMenuOpen(false)}
+                          >
+                            Admin Dashboard
+                          </a>
                         </div>
                       )}
                       {/* User-specific links */}
